@@ -1,3 +1,9 @@
-fn main() {
-    println!("Hello, world!");
-}
+#![allow(dead_code)]
+#[macro_use]
+extern crate log;
+extern crate env_logger;
+mod execution_engine;
+mod parallel_manager;
+mod test_helpers;
+
+fn main() {}
