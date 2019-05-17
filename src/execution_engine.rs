@@ -11,8 +11,6 @@ use vm::EnvInfo;
 enum ExecutionEvent {
     Stop,
     Transact(SignedTransaction),
-    DropCache(Address),
-    InsertCache(Address, AccountEntry),
     ChangeEnv(EnvInfo),
     SendCache(Address, Sender<(Address, AccountEntry)>),
     WaitCache(Address),
@@ -20,7 +18,6 @@ enum ExecutionEvent {
 
 pub struct ExecutionEngine {
     execution_channel_tx: Sender<ExecutionEvent>,
-    parallel_channel_rx: Receiver<AccountEntry>,
     cache_channel_tx: Sender<(Address, AccountEntry)>,
     handler: JoinHandle<State<StateDB>>,
 }
@@ -28,7 +25,6 @@ pub struct ExecutionEngine {
 impl ExecutionEngine {
     pub fn start(mut state: State<StateDB>, number: usize) -> ExecutionEngine {
         let (execution_channel_tx, execution_channel_rx) = mpsc::channel();
-        let (parallel_channel_tx, parallel_channel_rx) = mpsc::channel();
         let (cache_channel_tx, cache_channel_rx) = mpsc::channel();
         let mut env_info = EnvInfo::default();
         env_info.gas_limit = U256::from(100_000_000);
@@ -49,13 +45,6 @@ impl ExecutionEngine {
                             // TODO: check CALL
                             // the transaction has internal call
                             if trace.len() > 1 {}
-                        }
-                        ExecutionEvent::DropCache(addr) => {
-                            let account_entry = state.drop_account(&addr);
-                            parallel_channel_tx.send(account_entry).unwrap();
-                        }
-                        ExecutionEvent::InsertCache(addr, account_entry) => {
-                            state.insert_cache(&addr, account_entry);
                         }
                         ExecutionEvent::SendCache(addr, cache_channel_tx) => {
                             let account_entry = state.drop_account(&addr);
@@ -91,7 +80,6 @@ impl ExecutionEngine {
             .unwrap();
         let execution_engine = ExecutionEngine {
             execution_channel_tx: execution_channel_tx,
-            parallel_channel_rx: parallel_channel_rx,
             cache_channel_tx: cache_channel_tx,
             handler: handler,
         };
@@ -105,13 +93,6 @@ impl ExecutionEngine {
             .unwrap();
     }
 
-    pub fn drop_cache(&self, addr: Address) -> AccountEntry {
-        self.execution_channel_tx
-            .send(ExecutionEvent::DropCache(addr))
-            .unwrap();
-        self.parallel_channel_rx.recv().unwrap()
-    }
-
     pub fn send_cache(&self, addr: Address, channel_tx: Sender<(Address, AccountEntry)>) {
         self.execution_channel_tx
             .send(ExecutionEvent::SendCache(addr, channel_tx))
@@ -121,12 +102,6 @@ impl ExecutionEngine {
     pub fn wait_cache(&self, addr: Address) {
         self.execution_channel_tx
             .send(ExecutionEvent::WaitCache(addr))
-            .unwrap();
-    }
-
-    pub fn insert_cache(&self, addr: Address, cache: AccountEntry) {
-        self.execution_channel_tx
-            .send(ExecutionEvent::InsertCache(addr, cache))
             .unwrap();
     }
 

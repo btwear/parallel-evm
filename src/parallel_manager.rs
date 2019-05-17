@@ -1,5 +1,6 @@
 extern crate log;
 use crate::execution_engine::ExecutionEngine;
+use crate::utils;
 use common_types::transaction::{Action, SignedTransaction};
 use ethcore::factory::Factories;
 use ethcore::open_state::{AccountEntry, State};
@@ -7,11 +8,6 @@ use ethcore::open_state_db::StateDB;
 use ethereum_types::{Address, H256, U256};
 use std::collections::HashMap;
 use std::ops::Deref;
-
-pub enum ParallelEvent {
-    CacheBack(AccountEntry),
-    DependencyCheck(Vec<Address>),
-}
 
 pub struct ParallelManager {
     // for state
@@ -162,13 +158,17 @@ mod test {
     use std::io::Write;
 
     #[test]
-    fn test_static_dependency() {
+    fn test_static_dependency_100_4() {
+        let transactions = test_helpers::static_dep_txs(50, 100, true);
+        test_static_dependency(&transactions, 4);
+    }
+
+    fn test_static_dependency(transactions: &Vec<SignedTransaction>, engines: usize) {
         init("SD");
         // Set up state db
         let mut state = test_helpers::get_temp_state();
-        let transactions = test_helpers::static_dep_txs(50, 100, true);
 
-        for tx in &transactions {
+        for tx in transactions {
             state
                 .add_balance(&tx.sender(), &U256::from(1), CleanupMode::NoEmpty)
                 .unwrap();
@@ -178,15 +178,15 @@ mod test {
 
         // initiate PM
         let mut parallel_manager = ParallelManager::new(state_db, root, Factories::default());
-        parallel_manager.add_engines(4);
-        for tx in &transactions {
+        parallel_manager.add_engines(engines);
+        for tx in transactions {
             parallel_manager.assign_tx(&tx);
         }
         parallel_manager.stop();
 
         // Sequential execution
         let mut state = test_helpers::get_temp_state();
-        for tx in &transactions {
+        for tx in transactions {
             state
                 .add_balance(&tx.sender(), &U256::from(1), CleanupMode::NoEmpty)
                 .unwrap();

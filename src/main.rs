@@ -5,5 +5,6 @@ extern crate env_logger;
 mod execution_engine;
 mod parallel_manager;
 mod test_helpers;
+mod utils;
 
 fn main() {}
