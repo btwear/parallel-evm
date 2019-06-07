@@ -1,0 +1,16 @@
+{
+  "name": "etherscan-api",
+  "version": "1.0.0",
+  "description": "Etherscan APIs js wrapper",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "commander": "^2.20.0",
+    "request": "^2.88.0",
+    "request-promise": "^4.2.4"
+  }
+}

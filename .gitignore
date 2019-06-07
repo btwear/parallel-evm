@@ -16,3 +16,6 @@ Cargo.lock
 
 /target
 #**/*.rs.bk
+
+/res
+node_modules/

@@ -1,7 +1,21 @@
+use common_types::block::Block;
+use common_types::header::Header;
+use ethcore::client::ClientConfig;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
 use ethcore::test_helpers::new_db;
-use ethereum_types::U256;
+use ethcore_blockchain::BlockChainDB;
+use ethcore_db::NUM_COLUMNS;
+use ethereum_types::{H256, U256};
+use kvdb::KeyValueDB;
+use kvdb_rocksdb::{CompactionProfile, Database, DatabaseConfig};
+use rlp::{Decodable, PayloadInfo, Rlp};
+use std::fs;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
+use std::str::FromStr;
+use std::sync::Arc;
+use vm::EnvInfo;
 
 /// Returns temp state db
 pub fn get_temp_state_db() -> StateDB {
@@ -20,62 +34,131 @@ pub fn get_temp_state() -> State<StateDB> {
     State::new(journal_db, U256::from(0), Default::default())
 }
 
-/*
-/// TODO: remove following functions
-/// Generate the state and transfer transactions by given address number and transaction number
-use rand::thread_rng;
-pub fn state_and_txs(address_n: usize, transaction_n: usize) -> (State<StateDB>, Vec<SignedTransaction>) {
-// generate all address
-let keypairs = random_keypairs(address_n);
-// generate senders and receivers
-let mut rng = thread_rng();
-let mut senders = vec![];
-let mut receivers = vec![];
-for i in 0..transaction_n {
-let mut result = keypairs.iter().choose_multiple(&mut rng, 2);
-senders.push(result[0].clone());
-receivers.push(result[1].address());
-}
-// generate transactions
-let txs = random_transfer_txs(&senders, &receivers);
-
-//StateDb and State
-let mut state_db = test_helpers::get_temp_state_db();
-let mut factories = Factories::default();
-let vm_factory = Factory::new(VMType::Interpreter, 1024 * 32);
-factories.vm = vm_factory.into();
-let mut state = State::new(state_db, U256::from(0), factories);
-
-// Add balance to senders
-for sender in senders {
-let address = sender.address();
-state.add_balance(&address, &U256::from(50), CleanupMode::NoEmpty).unwrap();
-}
-state.commit();
-
-(state, txs)
+struct AppDB {
+    key_value: Arc<KeyValueDB>,
+    blooms: blooms_db::Database,
+    trace_blooms: blooms_db::Database,
 }
 
-/// Generate the state and transfer transactions without dependency by given address number and transaction number
-pub fn state_txs_nd(n: usize) -> (State<StateDB>, Vec<SignedTransaction>) {
-// Set up transactions
-let (senders, receivers) = random_senders_receivers(n);
-// Generate transactions
-let txs = random_transfer_txs(&senders, &receivers);
-// StateDB and State
-let mut state_db = test_helpers::get_temp_state_db();
-let mut factories = Factories::default();
-let vm_factory = Factory::new(VMType::Interpreter, 1024 * 32);
-factories.vm = vm_factory.into();
-let mut state = State::new(state_db, U256::from(0), factories);
+impl BlockChainDB for AppDB {
+    fn key_value(&self) -> &Arc<KeyValueDB> {
+        &self.key_value
+    }
 
-// Add balance to senders
-for sender in senders {
-let address = sender.address();
-state.add_balance(&address, &U256::from(50), CleanupMode::NoEmpty).unwrap();
-}
-state.commit();
+    fn blooms(&self) -> &blooms_db::Database {
+        &self.blooms
+    }
 
-(state, txs)
+    fn trace_blooms(&self) -> &blooms_db::Database {
+        &self.trace_blooms
+    }
 }
-*/
+
+/// Return default database config
+pub fn db_config() -> DatabaseConfig {
+    let client_config = ClientConfig::default();
+    let mut db_config = DatabaseConfig::with_columns(NUM_COLUMNS);
+    db_config.memory_budget = client_config.db_cache_size;
+    db_config.compaction = CompactionProfile::ssd();
+
+    db_config
+}
+
+pub fn open_state_db(db_path: &str) -> StateDB {
+    let db = open_database(&db_path);
+    let journal_db = journaldb::new(
+        db.key_value().clone(),
+        ::journaldb::Algorithm::EarlyMerge,
+        ::ethcore_db::COL_STATE,
+    );
+    let state_db = StateDB::new(journal_db, 5 * 1024 * 1024);
+
+    state_db
+}
+
+pub fn open_database(db_path: &str) -> Arc<BlockChainDB> {
+    let config = db_config();
+    let path = Path::new(db_path);
+
+    let blooms_path = path.join("blooms");
+    let trace_blooms_path = path.join("trace_blooms");
+    fs::create_dir_all(&blooms_path).unwrap();
+    fs::create_dir_all(&trace_blooms_path).unwrap();
+
+    let db = AppDB {
+        key_value: Arc::new(Database::open(&config, db_path).unwrap()),
+        blooms: blooms_db::Database::open(blooms_path).unwrap(),
+        trace_blooms: blooms_db::Database::open(trace_blooms_path).unwrap(),
+    };
+
+    Arc::new(db)
+}
+
+pub fn read_blocks(dir: &str, from: usize, to: usize) -> Vec<Block> {
+    let mut instream = fs::File::open(&dir)
+        .map_err(|_| format!("Cannot open given file: {}", dir))
+        .unwrap();
+    let mut first_bytes: Vec<u8> = vec![0; READAHEAD_BYTES];
+    let mut first_read = 0;
+    let mut blocks = vec![];
+    const READAHEAD_BYTES: usize = 8;
+
+    for i in 0..to + 1 {
+        let mut bytes = if first_read > 0 {
+            first_bytes.clone()
+        } else {
+            vec![0; READAHEAD_BYTES]
+        };
+        let n = if first_read > 0 {
+            first_read
+        } else {
+            instream
+                .read(&mut bytes)
+                .map_err(|_| "Error reading from the file/stream.")
+                .unwrap()
+        };
+        if n == 0 {
+            break;
+        }
+        first_read = 0;
+        let s = PayloadInfo::from(&bytes)
+            .map_err(|e| format!("Invalid RLP in the file/stream: {:?}", e))
+            .unwrap()
+            .total();
+        bytes.resize(s, 0);
+        instream
+            .read_exact(&mut bytes[n..])
+            .map_err(|_| "Error reading from the file/stream.")
+            .unwrap();
+
+        if i >= from - 1 {
+            let raw_block = Rlp::new(&bytes);
+            let block = Block::decode(&raw_block).unwrap();
+            blocks.push(block);
+        }
+    }
+    blocks
+}
+
+pub fn header_to_envinfo(header: &Header) -> EnvInfo {
+    let mut last_hashes = vec![header.parent_hash().clone()];
+    last_hashes.resize(256, H256::default());
+    EnvInfo {
+        number: header.number(),
+        author: header.author().clone(),
+        timestamp: header.timestamp(),
+        difficulty: header.difficulty().clone(),
+        gas_limit: header.gas_limit().clone(),
+        last_hashes: Arc::new(last_hashes),
+        gas_used: U256::zero(),
+    }
+}
+
+pub fn load_last_hashes(dir: &str) -> Vec<H256> {
+    let mut reader = BufReader::new(fs::File::open(dir).unwrap());
+    let mut last_hashes = vec![];
+    for hash in reader.lines() {
+        last_hashes.push(H256::from_str(&hash.unwrap()[2..]).unwrap());
+    }
+    last_hashes
+}

@@ -117,8 +117,11 @@ pub fn load_transactions(path: &str) -> Vec<SignedTransaction> {
 
 #[cfg(test)]
 mod test {
+    extern crate hex;
     use super::*;
     use crate::test_helpers::transfer_txs;
+    use ethereum_types::H256;
+    use rlp::{Decodable, Rlp};
 
     #[test]
     fn test_save_load_txs() {
@@ -131,5 +134,20 @@ mod test {
         let load_txs = load_transactions(tmp_path);
         let result = transactions == load_txs;
         assert!(result);
+    }
+
+    #[test]
+    fn test_decode_rlp_tx() {
+        let raw_data = hex::decode("f901cd8272cd850df847580083030d4094560e389a2b032319e742a59ae8bafa62671089fe80b90164391252150000000000000000000000003cb1d6876e9b594206392d64d767529c03ce9eab000000000000000000000000000000000000000000000001a055690d9db8000000000000000000000000000000000000000000000000000000000000000000c0000000000000000000000000000000000000000000000000000000005cee6a3b00000000000000000000000000000000000000000000000000000000000072d600000000000000000000000000000000000000000000000000000000000000e000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000041c77bb3e5359962fd67b7a28c25ef3fa09c7f100e17f915b369e7595f7f44e5c1282fe143c439d56b4572ac4ef30b8e548f884dcc0b24f7240ee404a9e2e5ed491c0000000000000000000000000000000000000000000000000000000000000025a0f42dc8bb875ef77e914636ee412cd148aad64429881b8af3f02c226977579e43a070d8c87affaaccadddcd5f42060cef184275b6ad95d33bced48265c08426fa81").unwrap();
+        let raw_tx = Rlp::new(raw_data.as_slice());
+
+        let unverified_tx = UnverifiedTransaction::decode(&raw_tx).unwrap();
+        let signed_tx = SignedTransaction::new(unverified_tx).unwrap();
+
+        let tx_hash = signed_tx.hash();
+        assert_eq!(
+            tx_hash,
+            H256::from("0xf6cb4e0926fc309d6299f2b18f4a72d87fa50d2cef043424cb39d62180bdcd01")
+        );
     }
 }

@@ -3,19 +3,17 @@ extern crate criterion;
 extern crate parallel_evm;
 use common_types::transaction::SignedTransaction;
 use criterion::{Bencher, Criterion, Fun};
-use ethcore::factory::Factories;
 use ethcore::open_state::CleanupMode;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
-use ethereum_types::{H256, U256};
+use ethereum_types::U256;
 use parallel_evm::execution_engine::sequential_exec;
 use parallel_evm::parallel_manager::ParallelManager;
 use parallel_evm::test_helpers;
 use std::fmt::{self, Debug, Formatter};
 
 struct BenchInput {
-    state_db: StateDB,
-    root: H256,
+    state: State<StateDB>,
     transactions: Vec<SignedTransaction>,
 }
 
@@ -34,34 +32,23 @@ fn bench_par_evm_2(b: &mut Bencher, input: &BenchInput) {
 fn bench_par_evm_4(b: &mut Bencher, input: &BenchInput) {
     bench_par_evm(b, input, 4);
 }
-fn bench_par_evm_8(b: &mut Bencher, input: &BenchInput) {
-    bench_par_evm(b, input, 8);
+fn bench_par_evm_6(b: &mut Bencher, input: &BenchInput) {
+    bench_par_evm(b, input, 6);
 }
 
 fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
     b.iter(|| {
-        let mut parallel_manager = ParallelManager::new(
-            input.state_db.boxed_clone(),
-            input.root.clone(),
-            Factories::default(),
-        );
+        let mut parallel_manager = ParallelManager::new(input.state.clone());
         parallel_manager.add_engines(engines);
-        for tx in &input.transactions {
-            parallel_manager.assign_tx(&tx);
-        }
+        parallel_manager.add_transactions(input.transactions.clone());
+        parallel_manager.consume();
         parallel_manager.stop();
     });
 }
 
 fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
     b.iter(|| {
-        let mut state = State::from_existing(
-            input.state_db.boxed_clone(),
-            input.root.clone(),
-            U256::zero(),
-            Factories::default(),
-        )
-        .unwrap();
+        let mut state = input.state.clone();
         sequential_exec(&mut state, &input.transactions);
         state.commit().unwrap();
     });
@@ -73,8 +60,8 @@ fn bench(c: &mut Criterion) {
     let par_evm_1 = Fun::new("Parallel_1", bench_par_evm_1);
     let par_evm_2 = Fun::new("Parallel_2", bench_par_evm_2);
     let par_evm_4 = Fun::new("Parallel_4", bench_par_evm_4);
-    let par_evm_8 = Fun::new("Parallel_8", bench_par_evm_8);
-    let funs = vec![par_evm_1, par_evm_2, par_evm_4, par_evm_8, seq_evm];
+    let par_evm_6 = Fun::new("Parallel_6", bench_par_evm_6);
+    let funs = vec![par_evm_1, par_evm_2, par_evm_4, par_evm_6, seq_evm];
 
     let senders = test_helpers::random_keypairs(tx_number);
     let to = test_helpers::random_addresses(tx_number);
@@ -86,11 +73,9 @@ fn bench(c: &mut Criterion) {
             .unwrap();
     }
     state.commit().unwrap();
-    let (root, state_db) = state.drop();
 
     let input = BenchInput {
-        state_db: state_db,
-        root: root,
+        state: state,
         transactions: transactions,
     };
     c.bench_functions("no_dependency_no_contract", funs, input);
