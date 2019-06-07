@@ -44,10 +44,6 @@ impl ParallelManager {
         }
     }
 
-    pub fn set_threads(&mut self, threads: usize) {
-        self.threads = threads;
-    }
-
     pub fn add_transactions(&mut self, mut txs: Vec<SignedTransaction>) {
         while !txs.is_empty() {
             self.events.push(ExecutionEvent::Transact(txs.remove(0)));
@@ -67,12 +63,7 @@ impl ParallelManager {
         }
     }
 
-    pub fn add_balance(&mut self, address: Address, amount: U256) {
-        self.events
-            .push(ExecutionEvent::AddBalance(address, amount));
-    }
-
-    pub fn add_env_info(&mut self, mut env_info: EnvInfo) {
+    pub fn add_env_info(&mut self, env_info: EnvInfo) {
         self.events.push(ExecutionEvent::ChangeEnv(env_info));
     }
 
@@ -239,12 +230,8 @@ mod tests {
     extern crate env_logger;
     use super::*;
     use crate::execution_engine::sequential_exec;
-    use crate::reward;
     use crate::test_helpers;
-    use ethcore::ethereum;
     use ethcore::open_state::CleanupMode;
-    use ethcore::spec::Spec;
-    use std::io::prelude::*;
     use std::io::Write;
 
     #[test]

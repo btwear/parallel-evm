@@ -5,7 +5,6 @@ use common_types::transaction::SignedTransaction;
 use ethcore::ethereum;
 use ethcore::factory::Factories;
 use ethcore::open_state::{CleanupMode, State};
-use ethcore::open_state_db::StateDB;
 use ethereum_types::{H256, U256};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -26,7 +25,6 @@ fn reproduce_7840001_state_root_parallel() {
     let mut last_hashes = VecDeque::from(test_helpers::load_last_hashes(last_hashes_dir));
     last_hashes.pop_front();
     last_hashes.resize(256, H256::zero());
-    let machine = ethereum::new_constantinople_fix_test_machine();
     let factories = Factories::default();
 
     let mut state =
@@ -44,7 +42,7 @@ fn reproduce_7840001_state_root_parallel() {
         for utx in &blocks[i].transactions {
             txs.push(SignedTransaction::new(utx.clone()).unwrap());
         }
-        parallel_manager.add_engines(4);
+        parallel_manager.add_engines(0);
         parallel_manager.add_env_info(env_info.clone());
         parallel_manager.add_transactions(txs);
         parallel_manager.add_reward(&rewards[i]);
@@ -84,17 +82,19 @@ fn reproduce_7840001_state_root() {
 
     // Execute transactions
     for utx in &block.transactions {
-        let mut tx = SignedTransaction::new(utx.clone()).unwrap();
+        let tx = SignedTransaction::new(utx.clone()).unwrap();
         let outcome = state.apply(&env_info, &machine, &tx, true).unwrap();
         env_info.gas_used = outcome.receipt.gas_used;
     }
 
     // Apply block rewards
-    state.add_balance(
-        &reward.miner.clone().into(),
-        &reward.reward.into(),
-        CleanupMode::NoEmpty,
-    );
+    state
+        .add_balance(
+            &reward.miner.clone().into(),
+            &reward.reward.into(),
+            CleanupMode::NoEmpty,
+        )
+        .unwrap();
 
     state.commit().unwrap();
     println!("{:?}", state.root());

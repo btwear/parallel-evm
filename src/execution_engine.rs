@@ -1,6 +1,5 @@
 use common_types::transaction::SignedTransaction;
 use ethcore::ethereum::new_constantinople_fix_test_machine as machine_generator;
-use ethcore::machine::EthereumMachine;
 use ethcore::open_state::{AccountEntry, CleanupMode, State};
 use ethcore::open_state_db::StateDB;
 use ethcore::trace::trace::{Action, Res};
@@ -203,28 +202,8 @@ impl SecureEngine {
         }
     }
 
-    // TODO:
     pub fn get_events(&mut self, events: Vec<ExecutionEvent>) {
         self.execution_events = Some(events);
-    }
-
-    pub fn add_transactions(&mut self, mut txs: Vec<SignedTransaction>) {
-        if let Some(mut events) = self.execution_events.take() {
-            while !txs.is_empty() {
-                events.push(ExecutionEvent::Transact(txs.remove(0)));
-            }
-            self.execution_events = Some(events)
-        } else {
-            panic!("No enviroment information");
-        }
-    }
-
-    pub fn change_env(&mut self, mut env_info: EnvInfo) {
-        if let Some(mut events) = self.execution_events.take() {
-            events.push(ExecutionEvent::ChangeEnv(env_info));
-        } else {
-            self.execution_events = Some(vec![ExecutionEvent::ChangeEnv(env_info)]);
-        }
     }
 
     pub fn join(&mut self) -> State<StateDB> {

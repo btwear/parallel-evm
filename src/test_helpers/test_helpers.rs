@@ -98,7 +98,7 @@ pub fn read_blocks(dir: &str, from: usize, to: usize) -> Vec<Block> {
     let mut instream = fs::File::open(&dir)
         .map_err(|_| format!("Cannot open given file: {}", dir))
         .unwrap();
-    let mut first_bytes: Vec<u8> = vec![0; READAHEAD_BYTES];
+    let first_bytes: Vec<u8> = vec![0; READAHEAD_BYTES];
     let mut first_read = 0;
     let mut blocks = vec![];
     const READAHEAD_BYTES: usize = 8;
@@ -155,7 +155,7 @@ pub fn header_to_envinfo(header: &Header) -> EnvInfo {
 }
 
 pub fn load_last_hashes(dir: &str) -> Vec<H256> {
-    let mut reader = BufReader::new(fs::File::open(dir).unwrap());
+    let reader = BufReader::new(fs::File::open(dir).unwrap());
     let mut last_hashes = vec![];
     for hash in reader.lines() {
         last_hashes.push(H256::from_str(&hash.unwrap()[2..]).unwrap());

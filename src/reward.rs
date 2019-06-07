@@ -1,6 +1,5 @@
 use ethjson::hash::Address;
 use ethjson::uint::Uint;
-use serde::de::{self, Deserialize, Deserializer};
 use serde_json;
 use std::fs;
 use std::io::{BufRead, BufReader};
@@ -34,7 +33,7 @@ impl Reward {
 
     pub fn from_file(dir: &str, from: usize, to: usize) -> Vec<Reward> {
         let f = fs::File::open(dir).unwrap();
-        let mut reader = BufReader::new(f);
+        let reader = BufReader::new(f);
         let mut rewards = vec![];
         for (i, line) in reader.lines().enumerate() {
             if i >= to {
@@ -44,16 +43,5 @@ impl Reward {
             }
         }
         rewards
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn read_rewards() {
-        let dir = "res/rewards/7840001_7850000.json";
-        let r = Reward::from_file(dir, 10, 11);
     }
 }
