@@ -9,7 +9,7 @@ bincode = "1.1.3"
 blooms-db = { path = "parity-ethereum/util/blooms-db" }
 common-types = { path = "parity-ethereum/ethcore/types" }
 env_logger = "0.6.1"
-ethcore = { path = "parity-ethereum/ethcore", features = ["test-helpers"] }
+ethcore = { path = "parity-ethereum/ethcore", features = ["test-helpers", "to-pod-full"] }
 ethcore-blockchain = { path = "parity-ethereum/ethcore/blockchain" }
 ethcore-db = { path = "parity-ethereum/ethcore/db" }
 ethereum-types = "0.4"
@@ -33,5 +33,5 @@ vm = { path = "parity-ethereum/ethcore/vm" }
 criterion = "0.2"
 
 [[bench]]
-name = "no_dependency_no_contract"
+name = "bench_main"
 harness = false

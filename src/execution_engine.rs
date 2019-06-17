@@ -58,10 +58,16 @@ impl ExecutionEngine {
                             // the transaction has internal call
                             for sub_trace in &trace[1..] {
                                 match &sub_trace.action {
-                                    Action::Call(call) => internal_call_addr.push(call.to),
+                                    Action::Call(call) => {
+                                        if !internal_call_addr.contains(&call.to) {
+                                            internal_call_addr.push(call.to);
+                                        }
+                                    }
                                     Action::Create(_) => match &sub_trace.result {
                                         Res::Create(create) => {
-                                            internal_call_addr.push(create.address)
+                                            if !internal_call_addr.contains(&create.address) {
+                                                internal_call_addr.push(create.address);
+                                            }
                                         }
                                         _ => (),
                                     },

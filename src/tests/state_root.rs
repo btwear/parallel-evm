@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 #[test]
 fn reproduce_7840001_state_root_parallel() {
-    let n = 1;
+    let n = 50;
     let db_dir = "res/db_7840000";
     let block_dir = "res/blocks/7840001_7850000.bin";
     let reward_dir = "res/rewards/7840001_7850000.json";
@@ -42,17 +42,21 @@ fn reproduce_7840001_state_root_parallel() {
         for utx in &blocks[i].transactions {
             txs.push(SignedTransaction::new(utx.clone()).unwrap());
         }
-        parallel_manager.add_engines(0);
+        parallel_manager.add_engines(3);
         parallel_manager.add_env_info(env_info.clone());
         parallel_manager.add_transactions(txs);
         parallel_manager.add_reward(&rewards[i]);
         parallel_manager.clone_to_secure();
         parallel_manager.consume();
-        if parallel_manager.stop() {
+        let race = parallel_manager.stop();
+        if race {
             n_race += 1;
+            parallel_manager.apply_secure();
+        } else {
+            parallel_manager.apply_engines();
         }
         state = parallel_manager.drop();
-        println!("{:?}", state.root());
+        println!("{:?}, {}", state.root(), race);
     }
 
     state.commit().unwrap();

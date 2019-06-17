@@ -23,6 +23,7 @@ pub struct ParallelManager {
     engines: Vec<ExecutionEngine>,
     best_thread: usize,
     threads: usize,
+    engine_states: Vec<State<StateDB>>,
 
     // secure thread
     secure_engine: SecureEngine,
@@ -38,6 +39,7 @@ impl ParallelManager {
             factories: Factories::default(),
             dependency_table: HashMap::new(),
             engines: vec![],
+            engine_states: vec![],
             best_thread: 0,
             threads: 0,
             secure_engine: SecureEngine::new(state),
@@ -183,7 +185,6 @@ impl ParallelManager {
 
     pub fn stop(&mut self) -> bool {
         let mut data_races = self.engines.is_empty();
-        let mut states = vec![];
         while let Some(engine) = self.engines.pop() {
             let engine_number = self.engines.len();
             let (state, internal_address) = engine.stop();
@@ -197,23 +198,27 @@ impl ParallelManager {
                     self.dependency_table.insert(addr, engine_number);
                 }
             }
-            states.push(state);
+            self.engine_states.push(state);
         }
-        if !data_races {
-            self.secure_engine.terminate();
-            while let Some(mut state) = states.pop() {
-                state
-                    .commit_external(&mut self.state_db, &mut self.state_root)
-                    .unwrap();
-            }
-        } else {
-            let mut state = self.secure_engine.join();
+
+        data_races
+    }
+
+    pub fn apply_engines(&mut self) {
+        self.secure_engine.terminate();
+        while let Some(mut state) = self.engine_states.pop() {
             state
-                .commit_external(&mut self.state_db, &mut self.state_root)
+                .commit_external(&mut self.state_db, &mut self.state_root, true)
                 .unwrap();
         }
-        self.threads = 0;
-        data_races
+    }
+
+    pub fn apply_secure(&mut self) {
+        let mut state = self.secure_engine.join();
+        state
+            .commit_external(&mut self.state_db, &mut self.state_root, true)
+            .unwrap();
+        self.engine_states = vec![];
     }
 
     pub fn drop(self) -> State<StateDB> {
