@@ -1,58 +1,63 @@
+use crate::test_helpers;
+use common_types::block::Block;
 use common_types::transaction::SignedTransaction;
-use crossbeam_channel::{self, unbounded, Sender};
+use crossbeam_channel::{self, unbounded, Receiver, Sender};
 use ethcore::ethereum::new_constantinople_fix_test_machine as machine_generator;
-use ethcore::open_state::{AccountEntry, CleanupMode, State};
+use ethcore::open_state::{AccountEntry, State};
 use ethcore::open_state_db::StateDB;
 use ethcore::trace::trace::{Action, Res};
-use ethereum_types::{Address, U256};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Weak};
+use ethereum_types::Address;
+use parking_lot::RwLock;
+use std::mem;
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use vm::EnvInfo;
 
 #[derive(Clone)]
 pub enum ExecutionEvent {
     Stop,
-    Transact(SignedTransaction),
-    ChangeEnv(EnvInfo),
+    Transact(usize),
+    BeginBlock(State<StateDB>, Arc<RwLock<Block>>),
+    EndBlock,
     SendCache(Address, Sender<(Address, AccountEntry)>),
     WaitCache(Address),
-    AddBalance(Address, U256),
 }
 
 pub struct ExecutionEngine {
     execution_channel_tx: Sender<ExecutionEvent>,
     cache_channel_tx: Sender<(Address, AccountEntry)>,
-    handler: JoinHandle<(State<StateDB>, Vec<Address>)>,
-}
-
-pub struct SecureEngine {
-    state: State<StateDB>,
-    handler: Option<JoinHandle<State<StateDB>>>,
-    running: Option<Weak<AtomicBool>>,
-    execution_events: Option<Vec<ExecutionEvent>>,
+    end_block_channel_rx: Receiver<(State<StateDB>, Vec<Address>)>,
+    handler: JoinHandle<()>,
 }
 
 impl ExecutionEngine {
-    pub fn start(mut state: State<StateDB>, number: usize) -> ExecutionEngine {
+    pub fn start(number: usize, mut env_info: EnvInfo) -> ExecutionEngine {
         let (execution_channel_tx, execution_channel_rx) = unbounded();
         let (cache_channel_tx, cache_channel_rx) = unbounded();
-        let mut env_info = EnvInfo::default();
+        let (end_block_channel_tx, end_block_channel_rx) = unbounded();
         let machine = machine_generator();
-        env_info.gas_limit = U256::from(100_000_000);
+        let mut wrap_state: Option<State<StateDB>> = None;
 
         let handler = thread::Builder::new()
-            .name(format!("{}{}", "engine".to_string(), &number.to_string()))
+            .name(format!("engine{}", &number.to_string()))
             .spawn(move || {
                 let mut cache_buffer = vec![];
                 let mut internal_call_addr = vec![];
+                let mut block: Arc<RwLock<Block>> = Default::default();
                 loop {
                     match execution_channel_rx.recv().unwrap() {
                         ExecutionEvent::Stop => {
                             break;
                         }
-                        ExecutionEvent::Transact(tx) => {
-                            let outcome = state.apply(&env_info, &machine, &tx, true).unwrap();
+                        ExecutionEvent::Transact(tx_index) => {
+                            let block = &*block.read();
+                            let tx = SignedTransaction::new(block.transactions[tx_index].clone())
+                                .unwrap();
+                            let outcome = wrap_state
+                                .as_mut()
+                                .unwrap()
+                                .apply(&env_info, &machine, &tx, true)
+                                .unwrap();
                             let trace = outcome.trace;
                             // TODO: check CALL
                             // the transaction has internal call
@@ -76,7 +81,7 @@ impl ExecutionEngine {
                             }
                         }
                         ExecutionEvent::SendCache(addr, cache_channel_tx) => {
-                            let account_entry = state.drop_account(&addr);
+                            let account_entry = wrap_state.as_mut().unwrap().drop_account(&addr);
                             cache_channel_tx.send((addr, account_entry)).unwrap();
                         }
                         ExecutionEvent::WaitCache(addr) => {
@@ -91,7 +96,10 @@ impl ExecutionEngine {
                             }
                             while !cached {
                                 let (_addr, account_entry) = cache_channel_rx.recv().unwrap();
-                                state.insert_cache(&_addr, account_entry);
+                                wrap_state
+                                    .as_mut()
+                                    .unwrap()
+                                    .insert_cache(&_addr, account_entry);
                                 if _addr == addr {
                                     cached = true;
                                 } else {
@@ -99,43 +107,32 @@ impl ExecutionEngine {
                                 }
                             }
                         }
-                        ExecutionEvent::ChangeEnv(new_env_info) => {
-                            env_info = new_env_info;
+                        ExecutionEvent::BeginBlock(state, block_lock) => {
+                            wrap_state = Some(state);
+                            block = block_lock;
+                            let block = &*block.read();
+                            let header = &block.header;
+                            test_helpers::update_envinfo_by_header(&mut env_info, &header);
                         }
-                        ExecutionEvent::AddBalance(addr, amount) => {
-                            state
-                                .add_balance(&addr, &amount, CleanupMode::NoEmpty)
-                                .unwrap();
+                        ExecutionEvent::EndBlock => {
+                            let call_addr = mem::replace(&mut internal_call_addr, vec![]);
+                            end_block_channel_tx.send((wrap_state.take().unwrap(), call_addr));
                         }
                     }
                 }
-                (state, internal_call_addr)
             })
             .unwrap();
-        let execution_engine = ExecutionEngine {
+        ExecutionEngine {
             execution_channel_tx: execution_channel_tx,
             cache_channel_tx: cache_channel_tx,
+            end_block_channel_rx: end_block_channel_rx,
             handler: handler,
-        };
-
-        return execution_engine;
+        }
     }
 
-    pub fn push_transaction(&self, tx: SignedTransaction) {
+    pub fn transact(&self, tx_index: usize) {
         self.execution_channel_tx
-            .send(ExecutionEvent::Transact(tx))
-            .unwrap();
-    }
-
-    pub fn push_add_balance(&self, addr: Address, amount: U256) {
-        self.execution_channel_tx
-            .send(ExecutionEvent::AddBalance(addr, amount))
-            .unwrap();
-    }
-
-    pub fn push_env(&self, env_info: EnvInfo) {
-        self.execution_channel_tx
-            .send(ExecutionEvent::ChangeEnv(env_info))
+            .send(ExecutionEvent::Transact(tx_index))
             .unwrap();
     }
 
@@ -151,90 +148,31 @@ impl ExecutionEngine {
             .unwrap();
     }
 
-    pub fn stop(self) -> (State<StateDB>, Vec<Address>) {
+    pub fn stop(self) {
         self.execution_channel_tx
             .send(ExecutionEvent::Stop)
             .unwrap();
-        self.handler.join().unwrap()
+        self.handler.join().unwrap();
     }
 
     pub fn cache_channel_tx(&self) -> Sender<(Address, AccountEntry)> {
         self.cache_channel_tx.clone()
     }
-}
 
-impl SecureEngine {
-    pub fn new(state: State<StateDB>) -> SecureEngine {
-        SecureEngine {
-            state: state,
-            handler: None,
-            running: None,
-            execution_events: None,
-        }
+    pub fn begin_block(&self, state: State<StateDB>, block_lock: Arc<RwLock<Block>>) {
+        self.execution_channel_tx
+            .send(ExecutionEvent::BeginBlock(state, block_lock))
+            .unwrap();
     }
 
-    pub fn run(&mut self) {
-        if let Some(events) = self.execution_events.take() {
-            let mut env_info = EnvInfo::default();
-            env_info.gas_limit = U256::from(100_000_000);
-            let running = Arc::new(AtomicBool::new(true));
-            let mut state = self.state.clone();
-            let machine = machine_generator();
-            self.running = Some(Arc::downgrade(&running));
-            self.handler = Some(
-                thread::Builder::new()
-                    .name("secure_engine".to_string())
-                    .spawn(move || {
-                        for event in events {
-                            if running.load(Ordering::Relaxed) {
-                                match event {
-                                    ExecutionEvent::Transact(tx) => {
-                                        state.apply(&env_info, &machine, &tx, false).unwrap();
-                                    }
-                                    ExecutionEvent::ChangeEnv(env) => env_info = env,
-                                    ExecutionEvent::AddBalance(addr, amount) => {
-                                        state
-                                            .add_balance(&addr, &amount, CleanupMode::NoEmpty)
-                                            .unwrap();
-                                    }
-                                    _ => (),
-                                }
-                            }
-                        }
-                        state
-                    })
-                    .unwrap(),
-            );
-        }
+    pub fn end_block(&self) {
+        self.execution_channel_tx
+            .send(ExecutionEvent::EndBlock)
+            .unwrap();
     }
 
-    pub fn get_events(&mut self, events: Vec<ExecutionEvent>) {
-        self.execution_events = Some(events);
-    }
-
-    pub fn join(&mut self) -> State<StateDB> {
-        self.handler.take().unwrap().join().unwrap()
-    }
-
-    pub fn terminate(&mut self) {
-        if let Some(running) = self.running.take() {
-            match running.upgrade() {
-                Some(running) => {
-                    (*running).store(false, Ordering::Relaxed);
-                    self.handler.take().unwrap().join().unwrap();
-                }
-                None => (),
-            }
-        }
-    }
-}
-
-pub fn sequential_exec(state: &mut State<StateDB>, txs: &Vec<SignedTransaction>) {
-    let mut env_info = EnvInfo::default();
-    env_info.gas_limit = U256::from(100_000_000);
-    let machine = machine_generator();
-
-    for tx in txs {
-        state.apply(&env_info, &machine, &tx, false).unwrap();
+    pub fn wait_state_and_call_addr(&self) -> (State<StateDB>, Vec<Address>) {
+        let (state, call_addr) = self.end_block_channel_rx.recv().unwrap();
+        return (state, call_addr);
     }
 }

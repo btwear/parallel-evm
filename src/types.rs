@@ -4,7 +4,7 @@ use serde_json;
 use std::fs;
 use std::io::{BufRead, BufReader};
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Reward {
     #[serde(rename = "blockNumber")]
     pub block_number: Uint,
@@ -17,7 +17,7 @@ pub struct Reward {
     pub uncle_inclusion_reward: Uint,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct Uncle {
     pub miner: Address,
     #[serde(rename = "unclePosition")]
@@ -27,6 +27,10 @@ pub struct Uncle {
 }
 
 impl Reward {
+    pub fn drop(self) -> (Address, Uint, Vec<Uncle>) {
+        (self.miner, self.reward, self.uncles)
+    }
+
     pub fn from_json_str(json_str: &str) -> Reward {
         serde_json::from_str(json_str).unwrap()
     }
@@ -43,5 +47,11 @@ impl Reward {
             }
         }
         rewards
+    }
+}
+
+impl Uncle {
+    pub fn drop(self) -> (Address, Uint) {
+        (self.miner, self.reward)
     }
 }

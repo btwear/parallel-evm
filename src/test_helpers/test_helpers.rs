@@ -36,13 +36,13 @@ pub fn get_temp_state() -> State<StateDB> {
 }
 
 struct AppDB {
-    key_value: Arc<KeyValueDB>,
+    key_value: Arc<dyn KeyValueDB>,
     blooms: blooms_db::Database,
     trace_blooms: blooms_db::Database,
 }
 
 impl BlockChainDB for AppDB {
-    fn key_value(&self) -> &Arc<KeyValueDB> {
+    fn key_value(&self) -> &Arc<dyn KeyValueDB> {
         &self.key_value
     }
 
@@ -77,7 +77,7 @@ pub fn open_state_db(db_path: &str) -> StateDB {
     state_db
 }
 
-pub fn open_database(db_path: &str) -> Arc<BlockChainDB> {
+pub fn open_database(db_path: &str) -> Arc<dyn BlockChainDB> {
     let config = db_config();
     let path = Path::new(db_path);
 

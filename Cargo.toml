@@ -14,6 +14,7 @@ ethcore = { path = "parity-ethereum/ethcore", features = ["test-helpers", "to-po
 ethcore-blockchain = { path = "parity-ethereum/ethcore/blockchain" }
 ethcore-db = { path = "parity-ethereum/ethcore/db" }
 ethereum-types = "0.4"
+ethkey = { path = "parity-ethereum/accounts/ethkey" }
 ethjson = { path = "parity-ethereum/json" }
 ethstore = { path = "parity-ethereum/accounts/ethstore" }
 hashbrown = "0.5.0"
@@ -22,6 +23,7 @@ journaldb = { path = "parity-ethereum/util/journaldb"  }
 kvdb = "0.1"
 kvdb-rocksdb = "0.1.3"
 log = "0.4.6"
+parking_lot = "0.8.0"
 rand = "0.6.5"
 rlp = { version = "0.3.0", features = ["ethereum"] }
 rustc-hex = "2.0.1"

@@ -1,5 +1,5 @@
-use crate::reward::Reward;
 use crate::test_helpers;
+use crate::types::Reward;
 use common_types::transaction::SignedTransaction;
 use ethcore::ethereum;
 use ethcore::factory::Factories;

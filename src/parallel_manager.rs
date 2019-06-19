@@ -1,18 +1,25 @@
-use crate::execution_engine::{ExecutionEngine, ExecutionEvent, SecureEngine};
-use crate::reward::Reward;
-use common_types::transaction::{Action, SignedTransaction};
+use crate::execution_engine::ExecutionEngine;
+use crate::secure_engine::SecureEngine;
+use crate::types::Reward;
+use common_types::block::Block;
+use common_types::transaction::Action;
 use ethcore::factory::Factories;
-use ethcore::open_state::State;
+use ethcore::open_state::{CleanupMode, State};
 use ethcore::open_state_db::StateDB;
 use ethereum_types::{Address, H256, U256};
+use ethkey::public_to_address;
 use hashbrown::HashMap;
+use parking_lot::RwLock;
 use std::clone::Clone;
 use std::ops::Deref;
+use std::sync::Arc;
 use vm::EnvInfo;
 
 pub struct ParallelManager {
     // transactions
-    events: Vec<ExecutionEvent>,
+    blocks: Vec<Arc<RwLock<Block>>>,
+    rewards: Vec<Reward>,
+    initial_last_hashes: Vec<H256>,
 
     // for state
     state_db: StateDB,
@@ -24,124 +31,134 @@ pub struct ParallelManager {
     engines: Vec<ExecutionEngine>,
     best_thread: usize,
     threads: usize,
-    engine_states: Vec<State<StateDB>>,
 
     // secure thread
     secure_engine: SecureEngine,
 }
 
-impl Clone for ParallelManager {
-    fn clone(&self) -> Self {
-        let state = self.state();
-        let secure_engine = SecureEngine::new(state);
-        ParallelManager {
-            events: self.events.clone(),
-            state_db: self.state_db.boxed_clone(),
-            state_root: self.state_root.clone(),
-            factories: self.factories.clone(),
-            dependency_table: HashMap::new(),
-            engines: vec![],
-            engine_states: vec![],
-            best_thread: 0,
-            threads: 0,
-            secure_engine: secure_engine,
-        }
-    }
-}
-
 impl ParallelManager {
-    pub fn new(state: State<StateDB>) -> ParallelManager {
+    pub fn new(state: State<StateDB>, last_hashes: Vec<H256>) -> Self {
         let (root, state_db) = state.clone().drop();
+        let mut initial_env_info: EnvInfo = Default::default();
+        initial_env_info.last_hashes = Arc::new(last_hashes.clone());
         ParallelManager {
-            events: vec![],
+            blocks: vec![],
+            rewards: vec![],
+            initial_last_hashes: last_hashes,
             state_db: state_db,
             state_root: root,
             factories: Factories::default(),
             dependency_table: HashMap::new(),
             engines: vec![],
-            engine_states: vec![],
             best_thread: 0,
             threads: 0,
-            secure_engine: SecureEngine::new(state),
+            secure_engine: SecureEngine::start(initial_env_info),
         }
     }
 
-    pub fn set_state(&mut self, state: State<StateDB>) {
-        let (root, state_db) = state.drop();
-        self.state_root = root;
-        self.state_db = state_db;
+    pub fn push_block_and_reward(&mut self, block: Block, reward: Reward) {
+        self.blocks.push(Arc::new(RwLock::new(block)));
+        self.rewards.push(reward);
     }
 
-    pub fn add_transactions(&mut self, mut txs: Vec<SignedTransaction>) {
-        while !txs.is_empty() {
-            self.events.push(ExecutionEvent::Transact(txs.remove(0)));
+    pub fn add_engines(&mut self, engines: usize) {
+        let mut env_info: EnvInfo = Default::default();
+        env_info.last_hashes = Arc::new(self.initial_last_hashes.clone());
+        for _ in 0..engines {
+            self.engines
+                .push(ExecutionEngine::start(self.threads, env_info.clone()));
+            self.threads += 1;
         }
     }
 
-    pub fn add_reward(&mut self, reward: &Reward) {
-        self.events.push(ExecutionEvent::AddBalance(
-            reward.miner.clone().into(),
-            reward.reward.clone().into(),
-        ));
-        for uncle in &reward.uncles {
-            self.events.push(ExecutionEvent::AddBalance(
-                uncle.miner.clone().into(),
-                uncle.reward.clone().into(),
-            ));
+    fn apply_reward(&mut self) {
+        if self.rewards.is_empty() {
+            return;
         }
-    }
 
-    pub fn add_env_info(&mut self, env_info: EnvInfo) {
-        self.events.push(ExecutionEvent::ChangeEnv(env_info));
-    }
+        let (miner, reward, uncles) = self.rewards.remove(0).drop();
+        let mut state = self.state();
+        state
+            .add_balance(&miner.into(), &reward.into(), CleanupMode::NoEmpty)
+            .unwrap();
 
-    pub fn clone_to_secure(&mut self) {
-        self.secure_engine.get_events(self.events.clone());
-    }
-
-    pub fn add_engines(&mut self, number: usize) {
-        for i in 0..number {
-            self.engines.push(ExecutionEngine::start(self.state(), i));
+        for uncle in uncles {
+            let (miner, reward) = uncle.drop();
+            state
+                .add_balance(&miner.into(), &reward.into(), CleanupMode::NoEmpty)
+                .unwrap();
         }
+        state.commit_external(&mut self.state_db, &mut self.state_root, true);
     }
 
-    pub fn state(&self) -> State<StateDB> {
+    fn state(&self) -> State<StateDB> {
         State::from_existing(
-            self.state_db.boxed_clone_canon(&self.state_root()),
-            self.state_root().clone(),
-            U256::from(0),
-            self.factories.clone(),
+            self.state_db.boxed_clone(),
+            self.state_root.clone(),
+            U256::zero(),
+            Default::default(),
         )
         .unwrap()
     }
 
-    pub fn consume(&mut self) {
-        self.secure_engine.run();
-        if self.engines.is_empty() {
+    pub fn step_one_block(&mut self) {
+        if self.blocks.is_empty() {
             return;
         }
-        for event in self.events.clone() {
-            match event {
-                ExecutionEvent::Transact(tx) => {
-                    let to = match tx.deref().deref().action {
-                        Action::Create => Address::zero(),
-                        Action::Call(addr) => addr,
-                    };
-                    let exec_tid = self.get_exec_tid(&tx.sender(), &to);
-                    self.engines[exec_tid].push_transaction(tx.clone());
-                }
-                ExecutionEvent::AddBalance(addr, amount) => {
-                    let exec_tid = self.get_exec_tid(&addr, &Address::zero());
-                    self.engines[exec_tid].push_add_balance(addr, amount);
-                }
-                ExecutionEvent::ChangeEnv(env_info) => {
-                    for engine in &self.engines {
-                        engine.push_env(env_info.clone());
-                    }
-                }
-                _ => (),
-            }
+
+        let block = self.blocks.remove(0);
+        // Give block lock and state to all engines
+        for engine in &self.engines {
+            engine.begin_block(self.state(), block.clone());
         }
+
+        // Process transactions
+        let block = &*block.read();
+        let transactions = &block.transactions;
+        for i in 0..transactions.len() {
+            let utx = &transactions[i];
+            let sender = public_to_address(&utx.recover_public().unwrap());
+            let to = match utx.deref().action {
+                Action::Create => Address::zero(),
+                Action::Call(addr) => addr,
+            };
+            let exec_tid = self.get_exec_tid(&sender, &to);
+            self.engines[exec_tid].transact(i);
+        }
+
+        for engine in &self.engines {
+            engine.end_block();
+        }
+
+        let mut engine_states = vec![];
+        let mut data_races = self.engines.is_empty();
+        for (engine_number, engine) in self.engines.iter().enumerate() {
+            println!("a");
+            let (state, call_addr) = engine.wait_state_and_call_addr();
+            println!("b");
+            if data_races {
+                continue;
+            }
+            for addr in call_addr {
+                if let Some(id) = self.dependency_table.get(&addr) {
+                    if id != &engine_number {
+                        data_races = true;
+                        break;
+                    }
+                } else {
+                    self.dependency_table.insert(addr, engine_number);
+                }
+            }
+            engine_states.push(state);
+        }
+
+        if data_races {
+            self.apply_secure();
+        } else {
+            self.apply_states(engine_states);
+        }
+
+        self.apply_reward();
     }
 
     fn get_exec_tid(&mut self, sender: &Address, to: &Address) -> usize {
@@ -205,38 +222,8 @@ impl ParallelManager {
         &self.state_root
     }
 
-    pub fn set_root(&mut self, root: H256) {
-        self.state_root = root;
-    }
-
-    pub fn stop(&mut self) -> bool {
-        let mut data_races = self.engines.is_empty();
-        while let Some(engine) = self.engines.pop() {
-            let engine_number = self.engines.len();
-            let (state, internal_address) = engine.stop();
-            if data_races {
-                continue;
-            }
-            for addr in internal_address {
-                if let Some(id) = self.dependency_table.get(&addr) {
-                    if id != &engine_number {
-                        data_races = true;
-                        self.engine_states = vec![];
-                        break;
-                    }
-                } else {
-                    self.dependency_table.insert(addr, engine_number);
-                }
-            }
-            self.engine_states.push(state);
-        }
-
-        data_races
-    }
-
-    pub fn apply_engines(&mut self) {
-        self.secure_engine.terminate();
-        while let Some(mut state) = self.engine_states.pop() {
+    pub fn apply_states(&mut self, mut states: Vec<State<StateDB>>) {
+        while let Some(mut state) = states.pop() {
             state
                 .commit_external(&mut self.state_db, &mut self.state_root, true)
                 .unwrap();
@@ -244,76 +231,14 @@ impl ParallelManager {
     }
 
     pub fn apply_secure(&mut self) {
-        let mut state = self.secure_engine.join();
+        self.secure_engine.end_block();
+        let mut state = self.secure_engine.wait_state();
         state
             .commit_external(&mut self.state_db, &mut self.state_root, true)
             .unwrap();
-        self.engine_states = vec![];
-    }
-
-    pub fn drop(self) -> State<StateDB> {
-        self.state()
     }
 
     pub fn root(&self) -> H256 {
         self.state_root
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    extern crate env_logger;
-    use super::*;
-    use crate::execution_engine::sequential_exec;
-    use crate::test_helpers;
-    use ethcore::open_state::CleanupMode;
-    use std::io::Write;
-
-    #[test]
-    fn test_static_dependency_100_4() {
-        let transactions = test_helpers::static_dep_txs(50, 100, true);
-        test_static_dependency(&transactions, 4);
-    }
-
-    fn test_static_dependency(transactions: &Vec<SignedTransaction>, engines: usize) {
-        init("SD");
-        // Set up state db
-        let mut state = test_helpers::get_temp_state();
-
-        for tx in transactions {
-            state
-                .add_balance(&tx.sender(), &U256::from(1), CleanupMode::NoEmpty)
-                .unwrap();
-        }
-        state.commit().unwrap();
-
-        // initiate PM
-        let mut parallel_manager = ParallelManager::new(state);
-        parallel_manager.add_engines(engines);
-        parallel_manager.add_transactions(transactions.clone());
-        parallel_manager.clone_to_secure();
-        parallel_manager.consume();
-        parallel_manager.stop();
-
-        // Sequential execution
-        let mut state = test_helpers::get_temp_state();
-        for tx in transactions {
-            state
-                .add_balance(&tx.sender(), &U256::from(1), CleanupMode::NoEmpty)
-                .unwrap();
-        }
-
-        sequential_exec(&mut state, &transactions);
-        state.commit().unwrap();
-
-        assert_eq!(state.root(), parallel_manager.state_root());
-    }
-
-    fn init(test_name: &'static str) {
-        env_logger::builder()
-            .default_format_timestamp(false)
-            .default_format_module_path(false)
-            .format(move |buf, record| writeln!(buf, "[{}] {}", test_name, record.args()))
-            .init();
     }
 }
