@@ -3,7 +3,6 @@ use crate::secure_engine::SecureEngine;
 use crate::types::Reward;
 use common_types::block::Block;
 use common_types::transaction::Action;
-use ethcore::factory::Factories;
 use ethcore::open_state::{CleanupMode, State};
 use ethcore::open_state_db::StateDB;
 use ethereum_types::{Address, H256, U256};
@@ -24,7 +23,6 @@ pub struct ParallelManager {
     // for state
     state_db: StateDB,
     state_root: H256,
-    factories: Factories,
 
     // for parallel execution
     dependency_table: HashMap<Address, usize>,
@@ -47,7 +45,6 @@ impl ParallelManager {
             initial_last_hashes: last_hashes,
             state_db: state_db,
             state_root: root,
-            factories: Factories::default(),
             dependency_table: HashMap::new(),
             engines: vec![],
             best_thread: 0,
@@ -62,11 +59,11 @@ impl ParallelManager {
     }
 
     pub fn add_engines(&mut self, engines: usize) {
-        let mut env_info: EnvInfo = Default::default();
-        env_info.last_hashes = Arc::new(self.initial_last_hashes.clone());
         for _ in 0..engines {
+            let mut env_info: EnvInfo = Default::default();
+            env_info.last_hashes = Arc::new(self.initial_last_hashes.clone());
             self.engines
-                .push(ExecutionEngine::start(self.threads, env_info.clone()));
+                .push(ExecutionEngine::start(self.threads, env_info));
             self.threads += 1;
         }
     }
@@ -88,7 +85,9 @@ impl ParallelManager {
                 .add_balance(&miner.into(), &reward.into(), CleanupMode::NoEmpty)
                 .unwrap();
         }
-        state.commit_external(&mut self.state_db, &mut self.state_root, true);
+        state
+            .commit_external(&mut self.state_db, &mut self.state_root, true)
+            .unwrap();
     }
 
     fn state(&self) -> State<StateDB> {
@@ -111,6 +110,7 @@ impl ParallelManager {
         for engine in &self.engines {
             engine.begin_block(self.state(), block.clone());
         }
+        self.secure_engine.begin_block(self.state(), block.clone());
 
         // Process transactions
         let block = &*block.read();
@@ -133,9 +133,7 @@ impl ParallelManager {
         let mut engine_states = vec![];
         let mut data_races = self.engines.is_empty();
         for (engine_number, engine) in self.engines.iter().enumerate() {
-            println!("a");
             let (state, call_addr) = engine.wait_state_and_call_addr();
-            println!("b");
             if data_races {
                 continue;
             }
@@ -159,6 +157,7 @@ impl ParallelManager {
         }
 
         self.apply_reward();
+        self.dependency_table.clear();
     }
 
     fn get_exec_tid(&mut self, sender: &Address, to: &Address) -> usize {
@@ -240,5 +239,12 @@ impl ParallelManager {
 
     pub fn root(&self) -> H256 {
         self.state_root
+    }
+
+    pub fn stop(mut self) {
+        while let Some(engine) = self.engines.pop() {
+            engine.stop();
+        }
+        self.secure_engine.stop();
     }
 }

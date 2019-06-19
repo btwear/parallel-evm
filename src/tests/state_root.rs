@@ -9,16 +9,14 @@ use std::collections::VecDeque;
 #[test]
 fn reproduce_7840001_state_root_parallel() {
     let n = 5;
-    let db_dir = "res/prune_db";
+    let db_dir = "res/db_7840000";
     let block_dir = "res/blocks/7840001_7850000.bin";
     let reward_dir = "res/rewards/7840001_7850000.json";
     let last_hashes_dir = "res/lastHashes7840001";
     let state_root_7840000 =
-        H256::from("0xee45b8d18c5d1993cbd6b985cd2ed2f437f9a29ef89c75cd1dc24e352993a77c");
+        H256::from("0xa7ca2c04e692960dac04909b3212baf12df7666efac68afad4646b3205a32c91");
 
-    println!("initial ok");
     let state_db = test_helpers::open_state_db(db_dir);
-    println!("db opened");
     let blocks = &test_helpers::read_blocks(block_dir, 1, n);
     let rewards = &Reward::from_file(reward_dir, 1, n);
     let mut last_hashes = VecDeque::from(test_helpers::load_last_hashes(last_hashes_dir));
@@ -26,7 +24,7 @@ fn reproduce_7840001_state_root_parallel() {
     last_hashes.resize(256, H256::zero());
     let factories = Factories::default();
 
-    let mut state =
+    let state =
         State::from_existing(state_db, state_root_7840000, U256::from(0), factories).unwrap();
 
     let mut parallel_manager = ParallelManager::new(state, last_hashes.clone().into());
@@ -38,4 +36,6 @@ fn reproduce_7840001_state_root_parallel() {
         parallel_manager.step_one_block();
         println!("{:?}", parallel_manager.root());
     }
+
+    parallel_manager.stop();
 }

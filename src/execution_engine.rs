@@ -116,7 +116,9 @@ impl ExecutionEngine {
                         }
                         ExecutionEvent::EndBlock => {
                             let call_addr = mem::replace(&mut internal_call_addr, vec![]);
-                            end_block_channel_tx.send((wrap_state.take().unwrap(), call_addr));
+                            end_block_channel_tx
+                                .send((wrap_state.take().unwrap(), call_addr))
+                                .unwrap();
                         }
                     }
                 }

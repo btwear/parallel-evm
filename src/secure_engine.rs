@@ -37,7 +37,7 @@ impl SecureEngine {
         let handler = thread::Builder::new()
             .name(format!("secure_engine"))
             .spawn(move || {
-                let mut block: Arc<RwLock<Block>> = Default::default();
+                let mut block: Arc<RwLock<Block>>;
                 loop {
                     match execution_channel_rx.recv().unwrap() {
                         SecureEvent::Stop => {
@@ -63,7 +63,9 @@ impl SecureEngine {
                             }
                         }
                         SecureEvent::EndBlock => {
-                            end_block_channel_tx.send(wrap_state.take().unwrap());
+                            end_block_channel_tx
+                                .send(wrap_state.take().unwrap())
+                                .unwrap();
                         }
                     }
                 }
