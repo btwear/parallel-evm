@@ -1,11 +1,11 @@
 use common_types::transaction::SignedTransaction;
+use crossbeam_channel::{self, unbounded, Sender};
 use ethcore::ethereum::new_constantinople_fix_test_machine as machine_generator;
 use ethcore::open_state::{AccountEntry, CleanupMode, State};
 use ethcore::open_state_db::StateDB;
 use ethcore::trace::trace::{Action, Res};
 use ethereum_types::{Address, U256};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Weak};
 use std::thread::{self, JoinHandle};
 use vm::EnvInfo;
@@ -35,8 +35,8 @@ pub struct SecureEngine {
 
 impl ExecutionEngine {
     pub fn start(mut state: State<StateDB>, number: usize) -> ExecutionEngine {
-        let (execution_channel_tx, execution_channel_rx) = mpsc::channel();
-        let (cache_channel_tx, cache_channel_rx) = mpsc::channel();
+        let (execution_channel_tx, execution_channel_rx) = unbounded();
+        let (cache_channel_tx, cache_channel_rx) = unbounded();
         let mut env_info = EnvInfo::default();
         let machine = machine_generator();
         env_info.gas_limit = U256::from(100_000_000);

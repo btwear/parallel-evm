@@ -10,6 +10,7 @@ use ethereum_types::{H256, U256};
 use kvdb::KeyValueDB;
 use kvdb_rocksdb::{CompactionProfile, Database, DatabaseConfig};
 use rlp::{Decodable, PayloadInfo, Rlp};
+use std::collections::VecDeque;
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
@@ -138,6 +139,25 @@ pub fn read_blocks(dir: &str, from: usize, to: usize) -> Vec<Block> {
         }
     }
     blocks
+}
+
+pub fn update_envinfo_by_header(env_info: &mut EnvInfo, header: &Header) {
+    env_info.number = header.number();
+    env_info.author = header.author().clone();
+    env_info.timestamp = header.timestamp();
+    env_info.difficulty = header.difficulty().clone();
+    env_info.gas_limit = header.gas_limit().clone();
+    env_info.gas_used = U256::zero();
+    let mut last_hashes = VecDeque::from(
+        Arc::try_unwrap(std::mem::replace(
+            &mut env_info.last_hashes,
+            Arc::new(vec![]),
+        ))
+        .unwrap(),
+    );
+    last_hashes.push_front(header.parent_hash().clone());
+    last_hashes.pop_back();
+    env_info.last_hashes = Arc::new(last_hashes.into());
 }
 
 pub fn header_to_envinfo(header: &Header) -> EnvInfo {

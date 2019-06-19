@@ -5,7 +5,8 @@ use ethcore::factory::Factories;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
 use ethereum_types::{Address, H256, U256};
-use std::collections::HashMap;
+use hashbrown::HashMap;
+use std::clone::Clone;
 use std::ops::Deref;
 use vm::EnvInfo;
 
@@ -29,6 +30,25 @@ pub struct ParallelManager {
     secure_engine: SecureEngine,
 }
 
+impl Clone for ParallelManager {
+    fn clone(&self) -> Self {
+        let state = self.state();
+        let secure_engine = SecureEngine::new(state);
+        ParallelManager {
+            events: self.events.clone(),
+            state_db: self.state_db.boxed_clone(),
+            state_root: self.state_root.clone(),
+            factories: self.factories.clone(),
+            dependency_table: HashMap::new(),
+            engines: vec![],
+            engine_states: vec![],
+            best_thread: 0,
+            threads: 0,
+            secure_engine: secure_engine,
+        }
+    }
+}
+
 impl ParallelManager {
     pub fn new(state: State<StateDB>) -> ParallelManager {
         let (root, state_db) = state.clone().drop();
@@ -44,6 +64,12 @@ impl ParallelManager {
             threads: 0,
             secure_engine: SecureEngine::new(state),
         }
+    }
+
+    pub fn set_state(&mut self, state: State<StateDB>) {
+        let (root, state_db) = state.drop();
+        self.state_root = root;
+        self.state_db = state_db;
     }
 
     pub fn add_transactions(&mut self, mut txs: Vec<SignedTransaction>) {
@@ -79,7 +105,7 @@ impl ParallelManager {
         }
     }
 
-    fn state(&self) -> State<StateDB> {
+    pub fn state(&self) -> State<StateDB> {
         State::from_existing(
             self.state_db.boxed_clone_canon(&self.state_root()),
             self.state_root().clone(),
@@ -188,10 +214,14 @@ impl ParallelManager {
         while let Some(engine) = self.engines.pop() {
             let engine_number = self.engines.len();
             let (state, internal_address) = engine.stop();
+            if data_races {
+                continue;
+            }
             for addr in internal_address {
                 if let Some(id) = self.dependency_table.get(&addr) {
                     if id != &engine_number {
                         data_races = true;
+                        self.engine_states = vec![];
                         break;
                     }
                 } else {
