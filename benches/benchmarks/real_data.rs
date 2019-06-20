@@ -8,10 +8,9 @@ use ethcore::open_state::CleanupMode;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
 use ethereum_types::{H256, U256};
-use parallel_evm::execution_engine::sequential_exec;
 use parallel_evm::parallel_manager::ParallelManager;
-use parallel_evm::reward::Reward;
 use parallel_evm::test_helpers::{self, update_envinfo_by_header};
+use parallel_evm::types::Reward;
 use std::collections::VecDeque;
 use std::fmt::{self, Debug, Formatter};
 use std::sync::Arc;
@@ -22,13 +21,13 @@ const BLOCK_PATH: &str = "res/blocks/7840001_7850000.bin";
 const REWARD_PATH: &str = "res/rewards/7840001_7850000.json";
 const LAST_HASHES_PATH: &str = "res/lastHashes7840001";
 const N: usize = 1;
+const STATE_ROOT_STR: &str = "0xee45b8d18c5d1993cbd6b985cd2ed2f437f9a29ef89c75cd1dc24e352993a77c";
 
 struct BenchInput {
     state: State<StateDB>,
     blocks: Vec<Block>,
     rewards: Vec<Reward>,
     last_hashes: Vec<H256>,
-    parallel_managers: Vec<ParallelManager>,
 }
 
 impl Debug for BenchInput {
@@ -48,25 +47,18 @@ fn bench_par_evm_3(b: &mut Bencher, input: &BenchInput) {
 }
 
 fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
-    let mut parallel_managers = input.parallel_managers.clone();
-    for pm in &mut parallel_managers {
-        pm.clone_to_secure();
-    }
     b.iter(|| {
-        let mut state = input.state.clone();
-        for parallel_manager in &mut parallel_managers {
-            parallel_manager.set_state(state.clone());
-            parallel_manager.add_engines(engines);
-            parallel_manager.consume();
-            let race = parallel_manager.stop();
-            if race {
-                parallel_manager.apply_secure();
-            } else {
-                parallel_manager.apply_engines();
-                println!("no races");
-            }
-            state = parallel_manager.state();
+        let mut parallel_manager =
+            ParallelManager::new(input.state.clone(), input.last_hashes.clone());
+        for i in 0..N {
+            parallel_manager
+                .push_block_and_reward(input.blocks[i].clone(), input.rewards[i].clone());
         }
+        parallel_manager.add_engines(engines);
+        for _ in 0..N {
+            parallel_manager.step_one_block();
+        }
+        parallel_manager.stop();
     });
 }
 
@@ -101,7 +93,7 @@ fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
                     )
                     .unwrap();
             }
-            state.commit();
+            state.commit().unwrap();
         }
     });
 }
@@ -121,8 +113,8 @@ fn bench(c: &mut Criterion) {
     last_hashes.resize(256, H256::zero());
 
     let factories = Factories::default();
-    let root = H256::from("0xee45b8d18c5d1993cbd6b985cd2ed2f437f9a29ef89c75cd1dc24e352993a77c");
-    let mut state = State::from_existing(
+    let root = H256::from(STATE_ROOT_STR);
+    let state = State::from_existing(
         state_db.boxed_clone(),
         root.clone(),
         U256::zero(),
@@ -130,34 +122,13 @@ fn bench(c: &mut Criterion) {
     )
     .unwrap();
 
-    let mut env_info = EnvInfo::default();
-    env_info.last_hashes = Arc::new(last_hashes.clone().into());
-    let machine = ethereum::new_constantinople_fix_test_machine();
-    let mut parallel_managers = vec![];
-    for i in 0..N {
-        let block = &blocks[i];
-        let reward = &rewards[i];
-        let mut parallel_manager = ParallelManager::new(state.clone());
-        update_envinfo_by_header(&mut env_info, &block.header);
-        let mut txs = vec![];
-        for utx in &block.transactions {
-            txs.push(SignedTransaction::new(utx.clone()).unwrap());
-        }
-        parallel_manager.add_env_info(env_info.clone());
-        parallel_manager.add_transactions(txs.clone());
-        parallel_manager.add_reward(reward.clone());
-        parallel_manager.clone_to_secure();
-
-        parallel_managers.push(parallel_manager);
-    }
-
     let input = BenchInput {
         state: state,
         blocks: blocks,
         rewards: rewards,
         last_hashes: last_hashes.into(),
-        parallel_managers: parallel_managers,
     };
+
     c.bench_functions("real_data", funs, input);
 }
 

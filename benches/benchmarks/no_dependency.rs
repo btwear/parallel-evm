@@ -1,14 +1,16 @@
 extern crate parallel_evm;
+use common_types::block::Block;
 use common_types::transaction::SignedTransaction;
 use criterion::{Bencher, Criterion, Fun};
+use ethcore::ethereum;
 use ethcore::open_state::CleanupMode;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
 use ethereum_types::U256;
-use parallel_evm::execution_engine::sequential_exec;
 use parallel_evm::parallel_manager::ParallelManager;
 use parallel_evm::test_helpers;
 use std::fmt::{self, Debug, Formatter};
+use std::ops::Deref;
 use vm::EnvInfo;
 
 struct BenchInput {
@@ -39,15 +41,21 @@ fn bench_par_evm_6(b: &mut Bencher, input: &BenchInput) {
 }
 
 fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
+    let block = Block {
+        header: Default::default(),
+        transactions: input
+            .transactions
+            .clone()
+            .into_iter()
+            .map(|stx| stx.deref().clone())
+            .collect(),
+        uncles: vec![],
+    };
     b.iter(|| {
-        let mut parallel_manager = ParallelManager::new(input.state.clone());
-        let mut env_info = EnvInfo::default();
-        env_info.gas_limit = U256::from(1000000);
+        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![]);
+        parallel_manager.push_block(block.clone());
         parallel_manager.add_engines(engines);
-        parallel_manager.add_env_info(env_info);
-        parallel_manager.add_transactions(input.transactions.clone());
-        parallel_manager.clone_to_secure();
-        parallel_manager.consume();
+        parallel_manager.step_one_block();
         parallel_manager.stop();
     });
 }
@@ -55,7 +63,12 @@ fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
 fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
     b.iter(|| {
         let mut state = input.state.clone();
-        sequential_exec(&mut state, &input.transactions);
+        let machine = ethereum::new_constantinople_fix_test_machine();
+        let mut env_info: EnvInfo = Default::default();
+        env_info.gas_limit = U256::from(100_000_000);
+        for tx in &input.transactions {
+            state.apply(&env_info, &machine, &tx, false).unwrap();
+        }
         state.commit().unwrap();
     });
 }

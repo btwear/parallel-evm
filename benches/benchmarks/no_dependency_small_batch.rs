@@ -1,15 +1,20 @@
 extern crate parallel_evm;
+use common_types::block::Block;
 use common_types::transaction::SignedTransaction;
 use criterion::{Bencher, Criterion, Fun};
+use ethcore::ethereum;
 use ethcore::open_state::CleanupMode;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
 use ethereum_types::U256;
-use parallel_evm::execution_engine::sequential_exec;
 use parallel_evm::parallel_manager::ParallelManager;
 use parallel_evm::test_helpers;
 use std::fmt::{self, Debug, Formatter};
+use std::ops::Deref;
 use vm::EnvInfo;
+
+const TX_COUNT: usize = 100000;
+const CHUNK_SIZE: usize = 2000;
 
 struct BenchInput {
     state: State<StateDB>,
@@ -36,36 +41,38 @@ fn bench_par_evm_6(b: &mut Bencher, input: &BenchInput) {
 }
 
 fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
+    let mut blocks = vec![];
+    for txs in input.transactions.chunks(CHUNK_SIZE) {
+        blocks.push(Block {
+            header: Default::default(),
+            transactions: txs.into_iter().map(|stx| stx.deref().clone()).collect(),
+            uncles: vec![],
+        });
+    }
     b.iter(|| {
-        let mut env_info = EnvInfo::default();
-        env_info.gas_limit = U256::from(1000000);
-        let mut state = input.state.clone();
-        for txs in input.transactions.chunks(2000) {
-            let mut parallel_manager = ParallelManager::new(state.clone());
-            parallel_manager.add_engines(engines);
-            parallel_manager.add_env_info(env_info.clone());
-            parallel_manager.add_transactions(txs.to_vec().clone());
-            parallel_manager.clone_to_secure();
-            parallel_manager.consume();
-            parallel_manager.stop();
-            parallel_manager.apply_engines();
-            state = parallel_manager.drop();
+        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![]);
+        parallel_manager.add_engines(engines);
+        for i in 0..TX_COUNT / CHUNK_SIZE {
+            parallel_manager.push_block(blocks[i].clone());
+            parallel_manager.step_one_block();
         }
+        parallel_manager.stop();
     });
 }
 
 fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
     b.iter(|| {
         let mut state = input.state.clone();
-        for txs in input.transactions.chunks(2000) {
-            sequential_exec(&mut state, &txs.to_vec());
-            state.commit().unwrap();
+        let machine = ethereum::new_constantinople_fix_test_machine();
+        let mut env_info: EnvInfo = Default::default();
+        env_info.gas_limit = U256::from(100_000_000);
+        for tx in &input.transactions {
+            state.apply(&env_info, &machine, &tx, false).unwrap();
         }
     });
 }
 
 fn bench(c: &mut Criterion) {
-    let tx_number = 10000;
     let seq_evm = Fun::new("Sequential", bench_seq_evm);
     let par_evm_1 = Fun::new("Parallel_1", bench_par_evm_1);
     let par_evm_2 = Fun::new("Parallel_2", bench_par_evm_2);
@@ -73,8 +80,8 @@ fn bench(c: &mut Criterion) {
     let par_evm_6 = Fun::new("Parallel_6", bench_par_evm_6);
     let funs = vec![seq_evm, par_evm_1, par_evm_2, par_evm_4, par_evm_6];
 
-    let senders = test_helpers::random_keypairs(tx_number);
-    let to = test_helpers::random_addresses(tx_number);
+    let senders = test_helpers::random_keypairs(TX_COUNT);
+    let to = test_helpers::random_addresses(TX_COUNT);
     let transactions = test_helpers::transfer_txs(&senders, &to);
     let mut state = test_helpers::get_temp_state();
     for tx in &transactions {
