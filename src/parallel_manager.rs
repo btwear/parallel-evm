@@ -10,7 +10,6 @@ use ethereum_types::{Address, H256, U256};
 use ethkey::public_to_address;
 use hashbrown::HashMap;
 use parking_lot::RwLock;
-use std::clone::Clone;
 use std::ops::Deref;
 use std::sync::Arc;
 use vm::EnvInfo;
@@ -134,29 +133,29 @@ impl ParallelManager {
             return;
         }
 
-        let block = self.blocks.remove(0);
+        let block_lock = self.blocks.remove(0);
+        let real_block = &*block_lock.read();
         {
             let mut env_info = self.current_env_info.write();
-            let block = block.read();
-            test_helpers::update_envinfo_by_header(&mut env_info, &block.header);
+            test_helpers::update_envinfo_by_header(&mut env_info, &real_block.header);
         }
         // Give block lock and state to all engines
         for engine in &self.engines {
-            engine.begin_block(self.state(), block.clone());
+            engine.begin_block(self.state(), block_lock.clone());
         }
         if !self.secure_on_demand {
-            self.secure_engine.begin_block(self.state(), block.clone());
+            self.secure_engine
+                .begin_block(self.state(), block_lock.clone());
         }
 
         // Process transactions
-        let real_block = &*block.read();
         let transactions = &real_block.transactions;
         for i in 0..transactions.len() {
             let utx = &transactions[i];
             let sender = public_to_address(&utx.recover_public().unwrap());
             let to = match utx.deref().action {
-                Action::Create => Address::zero(),
-                Action::Call(addr) => addr,
+                Action::Create => None,
+                Action::Call(addr) => Some(addr),
             };
             let exec_tid = self.get_exec_tid(&sender, &to);
             self.engines[exec_tid].transact(i);
@@ -185,10 +184,12 @@ impl ParallelManager {
             }
             engine_states.push(state);
         }
+        self.dependency_table.clear();
 
         if data_races {
             if self.secure_on_demand {
-                self.secure_engine.begin_block(self.state(), block.clone());
+                self.secure_engine
+                    .begin_block(self.state(), block_lock.clone());
             }
             self.apply_secure();
         } else {
@@ -199,25 +200,49 @@ impl ParallelManager {
         }
 
         self.apply_reward();
-        self.dependency_table.clear();
     }
 
-    fn get_exec_tid(&mut self, sender: &Address, to: &Address) -> usize {
+    pub fn state_root(&self) -> &H256 {
+        &self.state_root
+    }
+
+    pub fn apply_states(&mut self, mut states: Vec<State<StateDB>>) {
+        while let Some(mut state) = states.pop() {
+            state
+                .commit_external(&mut self.state_db, &mut self.state_root, true)
+                .unwrap();
+        }
+    }
+
+    pub fn apply_secure(&mut self) {
+        let mut state = self.secure_engine.end_block();
+        state
+            .commit_external(&mut self.state_db, &mut self.state_root, true)
+            .unwrap();
+    }
+
+    pub fn stop(mut self) {
+        while let Some(engine) = self.engines.pop() {
+            engine.stop();
+        }
+        self.secure_engine.stop();
+    }
+
+    #[inline(always)]
+    fn get_exec_tid(&mut self, sender: &Address, to: &Option<Address>) -> usize {
         let mut dependency_level = 0;
-        // dependency thread id.
         let mut dependency_tid = [0, 0];
         // address need to be insert to dependency table, possibly
         // ethereum address of transaction sender and receiver.
-        let mut insert_addr = [sender.clone(), to.clone()];
-
+        let mut insert_addr = [Some(sender.clone()), to.clone()];
         // Find static dependency between threads, and count the
         // dependency level.
         for i in 0..2 {
-            match self.dependency_table.get(&insert_addr[i]) {
+            match self.dependency_table.get(insert_addr[i].as_ref().unwrap()) {
                 Some(tid) => {
                     dependency_tid[i] = *tid;
                     dependency_level = dependency_level + i + 1;
-                    insert_addr[i] = Address::zero();
+                    insert_addr[i] = None;
                 }
                 None => (),
             }
@@ -242,13 +267,12 @@ impl ParallelManager {
             let cache_channel_tx = self.engines[exec_tid].cache_channel_tx();
             self.engines[drop_tid].send_cache(sender.clone(), cache_channel_tx);
             self.engines[exec_tid].wait_cache(sender.clone());
-            insert_addr[0] = sender.clone();
+            insert_addr[0] = Some(sender.clone());
         }
-
         // Update dependency table
         for i in 0..2 {
-            if insert_addr[i] != Address::zero() {
-                self.dependency_table.insert(insert_addr[i], exec_tid);
+            if let Some(addr) = insert_addr[i] {
+                self.dependency_table.insert(addr, exec_tid);
             }
         }
 
@@ -257,35 +281,5 @@ impl ParallelManager {
         }
 
         exec_tid
-    }
-
-    pub fn state_root(&self) -> &H256 {
-        &self.state_root
-    }
-
-    pub fn apply_states(&mut self, mut states: Vec<State<StateDB>>) {
-        while let Some(mut state) = states.pop() {
-            state
-                .commit_external(&mut self.state_db, &mut self.state_root, true)
-                .unwrap();
-        }
-    }
-
-    pub fn apply_secure(&mut self) {
-        let mut state = self.secure_engine.end_block();
-        state
-            .commit_external(&mut self.state_db, &mut self.state_root, true)
-            .unwrap();
-    }
-
-    pub fn root(&self) -> H256 {
-        self.state_root
-    }
-
-    pub fn stop(mut self) {
-        while let Some(engine) = self.engines.pop() {
-            engine.stop();
-        }
-        self.secure_engine.stop();
     }
 }

@@ -5,6 +5,7 @@ use ethcore::ethereum::new_constantinople_fix_test_machine as machine_generator;
 use ethcore::open_state::{AccountEntry, State};
 use ethcore::open_state_db::StateDB;
 use ethcore::trace::trace::{Action, Res};
+use ethcore::trace::FlatTrace;
 use ethereum_types::Address;
 use parking_lot::RwLock;
 use std::mem;
@@ -34,88 +35,70 @@ impl ExecutionEngine {
         let (execution_channel_tx, execution_channel_rx) = unbounded();
         let (cache_channel_tx, cache_channel_rx) = unbounded();
         let (end_block_channel_tx, end_block_channel_rx) = unbounded();
-        let machine = machine_generator();
-        let mut wrap_state: Option<State<StateDB>> = None;
 
         let handler = thread::Builder::new()
             .name(format!("engine{}", &number.to_string()))
             .spawn(move || {
+                let machine = machine_generator();
                 let mut cache_buffer = vec![];
                 let mut internal_call_addr = vec![];
-                let mut block: Arc<RwLock<Block>> = Default::default();
                 loop {
                     match execution_channel_rx.recv().unwrap() {
                         ExecutionEvent::Stop => {
                             break;
                         }
-                        ExecutionEvent::Transact(tx_index) => {
-                            let block = &*block.read();
-                            let env_info = &*env_info.read();
-                            let tx = SignedTransaction::new(block.transactions[tx_index].clone())
-                                .unwrap();
-                            let outcome = wrap_state
-                                .as_mut()
-                                .unwrap()
-                                .apply(env_info, &machine, &tx, true)
-                                .unwrap();
-                            let trace = outcome.trace;
-                            // the transaction has internal call
-                            for sub_trace in &trace[1..] {
-                                match &sub_trace.action {
-                                    Action::Call(call) => {
-                                        if !internal_call_addr.contains(&call.to) {
-                                            internal_call_addr.push(call.to);
-                                        }
+                        ExecutionEvent::BeginBlock(mut state, block_lock) => {
+                            loop {
+                                match execution_channel_rx.recv().unwrap() {
+                                    ExecutionEvent::Transact(tx_index) => {
+                                        let block = &*block_lock.read();
+                                        let env_info = &*env_info.read();
+                                        let tx = SignedTransaction::new(
+                                            block.transactions[tx_index].clone(),
+                                        )
+                                        .unwrap();
+                                        let outcome =
+                                            state.apply(env_info, &machine, &tx, true).unwrap();
+                                        let trace = outcome.trace;
+                                        // the transaction has internal call
+                                        get_internal_call_address(&trace, &mut internal_call_addr);
                                     }
-                                    Action::Create(_) => match &sub_trace.result {
-                                        Res::Create(create) => {
-                                            if !internal_call_addr.contains(&create.address) {
-                                                internal_call_addr.push(create.address);
+                                    ExecutionEvent::SendCache(addr, cache_channel_tx) => {
+                                        let account_entry = state.drop_account(&addr);
+                                        cache_channel_tx.send((addr, account_entry)).unwrap();
+                                    }
+                                    ExecutionEvent::WaitCache(addr) => {
+                                        let mut cached = false;
+                                        let len = cache_buffer.len();
+                                        for i in 0..len {
+                                            if cache_buffer[i] == addr {
+                                                cache_buffer.remove(i);
+                                                cached = true;
+                                                break;
                                             }
                                         }
-                                        _ => (),
-                                    },
+                                        while !cached {
+                                            let (_addr, account_entry) =
+                                                cache_channel_rx.recv().unwrap();
+                                            state.insert_cache(&_addr, account_entry);
+                                            if _addr == addr {
+                                                cached = true;
+                                            } else {
+                                                cache_buffer.push(_addr);
+                                            }
+                                        }
+                                    }
+                                    ExecutionEvent::EndBlock => {
+                                        let call_addr =
+                                            mem::replace(&mut internal_call_addr, vec![]);
+                                        end_block_channel_tx.send((state, call_addr)).unwrap();
+                                        break;
+                                    }
                                     _ => (),
                                 }
                             }
                         }
-                        ExecutionEvent::SendCache(addr, cache_channel_tx) => {
-                            let account_entry = wrap_state.as_mut().unwrap().drop_account(&addr);
-                            cache_channel_tx.send((addr, account_entry)).unwrap();
-                        }
-                        ExecutionEvent::WaitCache(addr) => {
-                            let mut cached = false;
-                            let len = cache_buffer.len();
-                            for i in 0..len {
-                                if cache_buffer[i] == addr {
-                                    cache_buffer.remove(i);
-                                    cached = true;
-                                    break;
-                                }
-                            }
-                            while !cached {
-                                let (_addr, account_entry) = cache_channel_rx.recv().unwrap();
-                                wrap_state
-                                    .as_mut()
-                                    .unwrap()
-                                    .insert_cache(&_addr, account_entry);
-                                if _addr == addr {
-                                    cached = true;
-                                } else {
-                                    cache_buffer.push(_addr);
-                                }
-                            }
-                        }
-                        ExecutionEvent::BeginBlock(state, block_lock) => {
-                            wrap_state = Some(state);
-                            block = block_lock;
-                        }
-                        ExecutionEvent::EndBlock => {
-                            let call_addr = mem::replace(&mut internal_call_addr, vec![]);
-                            end_block_channel_tx
-                                .send((wrap_state.take().unwrap(), call_addr))
-                                .unwrap();
-                        }
+                        _ => (),
                     }
                 }
             })
@@ -172,5 +155,27 @@ impl ExecutionEngine {
     pub fn wait_state_and_call_addr(&self) -> (State<StateDB>, Vec<Address>) {
         let (state, call_addr) = self.end_block_channel_rx.recv().unwrap();
         return (state, call_addr);
+    }
+}
+
+#[inline(always)]
+fn get_internal_call_address(trace: &Vec<FlatTrace>, internal_call_addr: &mut Vec<Address>) {
+    for sub_trace in &trace[1..] {
+        match &sub_trace.action {
+            Action::Call(call) => {
+                if !internal_call_addr.contains(&call.to) {
+                    internal_call_addr.push(call.to);
+                }
+            }
+            Action::Create(_) => match &sub_trace.result {
+                Res::Create(create) => {
+                    if !internal_call_addr.contains(&create.address) {
+                        internal_call_addr.push(create.address);
+                    }
+                }
+                _ => (),
+            },
+            _ => (),
+        }
     }
 }

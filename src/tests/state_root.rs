@@ -34,7 +34,7 @@ fn reproduce_7840001_state_root_parallel() {
         let reward = &rewards[i];
         parallel_manager.push_block_and_reward(block.clone(), reward.clone());
         parallel_manager.step_one_block();
-        println!("{:?}", parallel_manager.root());
+        println!("{:?}", parallel_manager.state_root());
     }
 
     parallel_manager.stop();
