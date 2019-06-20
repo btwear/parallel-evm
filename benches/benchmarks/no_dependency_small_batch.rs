@@ -50,7 +50,7 @@ fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
         });
     }
     b.iter(|| {
-        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![]);
+        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![], false);
         parallel_manager.add_engines(engines);
         for i in 0..TX_COUNT / CHUNK_SIZE {
             parallel_manager.push_block(blocks[i].clone());

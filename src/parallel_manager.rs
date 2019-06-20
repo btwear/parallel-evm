@@ -1,5 +1,6 @@
 use crate::execution_engine::ExecutionEngine;
 use crate::secure_engine::SecureEngine;
+use crate::test_helpers;
 use crate::types::Reward;
 use common_types::block::Block;
 use common_types::transaction::Action;
@@ -18,7 +19,7 @@ pub struct ParallelManager {
     // transactions
     blocks: Vec<Arc<RwLock<Block>>>,
     rewards: Vec<Reward>,
-    initial_last_hashes: Vec<H256>,
+    current_env_info: Arc<RwLock<EnvInfo>>,
 
     // for state
     state_db: StateDB,
@@ -32,29 +33,52 @@ pub struct ParallelManager {
 
     // secure thread
     secure_engine: SecureEngine,
+    secure_on_demand: bool,
 }
 
 impl ParallelManager {
-    pub fn new(state: State<StateDB>, last_hashes: Vec<H256>) -> Self {
+    pub fn new(state: State<StateDB>, last_hashes: Vec<H256>, secure_on_demand: bool) -> Self {
         let (root, state_db) = state.clone().drop();
-        let mut initial_env_info: EnvInfo = Default::default();
-        initial_env_info.last_hashes = Arc::new(last_hashes.clone());
+        let env_info: Arc<RwLock<EnvInfo>> = Default::default();
+        {
+            let mut env_info = env_info.write();
+            env_info.last_hashes = Arc::new(last_hashes.clone());
+        }
         ParallelManager {
             blocks: vec![],
             rewards: vec![],
-            initial_last_hashes: last_hashes,
+            current_env_info: env_info.clone(),
             state_db: state_db,
             state_root: root,
             dependency_table: HashMap::new(),
             engines: vec![],
             best_thread: 0,
             threads: 0,
-            secure_engine: SecureEngine::start(initial_env_info),
+            secure_engine: SecureEngine::start(env_info),
+            secure_on_demand: secure_on_demand,
         }
     }
 
     pub fn push_block(&mut self, block: Block) {
         self.blocks.push(Arc::new(RwLock::new(block)));
+    }
+
+    pub fn push_block_arc(&mut self, block: Arc<RwLock<Block>>) {
+        self.blocks.push(block);
+    }
+
+    pub fn push_block_and_reward_arc(&mut self, block: Arc<RwLock<Block>>, reward: Reward) {
+        self.blocks.push(block);
+        self.rewards.push(reward);
+    }
+
+    pub fn assign_block_and_reward_arc(
+        &mut self,
+        blocks: Vec<Arc<RwLock<Block>>>,
+        rewards: Vec<Reward>,
+    ) {
+        self.blocks = blocks;
+        self.rewards = rewards;
     }
 
     pub fn push_block_and_reward(&mut self, block: Block, reward: Reward) {
@@ -64,10 +88,10 @@ impl ParallelManager {
 
     pub fn add_engines(&mut self, engines: usize) {
         for _ in 0..engines {
-            let mut env_info: EnvInfo = Default::default();
-            env_info.last_hashes = Arc::new(self.initial_last_hashes.clone());
-            self.engines
-                .push(ExecutionEngine::start(self.threads, env_info));
+            self.engines.push(ExecutionEngine::start(
+                self.threads,
+                self.current_env_info.clone(),
+            ));
             self.threads += 1;
         }
     }
@@ -89,9 +113,10 @@ impl ParallelManager {
                 .add_balance(&miner.into(), &reward.into(), CleanupMode::NoEmpty)
                 .unwrap();
         }
-        state
-            .commit_external(&mut self.state_db, &mut self.state_root, true)
-            .unwrap();
+        state.commit().unwrap();
+        let (root, state_db) = state.drop();
+        self.state_root = root;
+        self.state_db = state_db;
     }
 
     fn state(&self) -> State<StateDB> {
@@ -110,15 +135,22 @@ impl ParallelManager {
         }
 
         let block = self.blocks.remove(0);
+        {
+            let mut env_info = self.current_env_info.write();
+            let block = block.read();
+            test_helpers::update_envinfo_by_header(&mut env_info, &block.header);
+        }
         // Give block lock and state to all engines
         for engine in &self.engines {
             engine.begin_block(self.state(), block.clone());
         }
-        self.secure_engine.begin_block(self.state(), block.clone());
+        if !self.secure_on_demand {
+            self.secure_engine.begin_block(self.state(), block.clone());
+        }
 
         // Process transactions
-        let block = &*block.read();
-        let transactions = &block.transactions;
+        let real_block = &*block.read();
+        let transactions = &real_block.transactions;
         for i in 0..transactions.len() {
             let utx = &transactions[i];
             let sender = public_to_address(&utx.recover_public().unwrap());
@@ -155,8 +187,14 @@ impl ParallelManager {
         }
 
         if data_races {
+            if self.secure_on_demand {
+                self.secure_engine.begin_block(self.state(), block.clone());
+            }
             self.apply_secure();
         } else {
+            if !self.secure_on_demand {
+                self.secure_engine.terminate();
+            }
             self.apply_states(engine_states);
         }
 
@@ -234,8 +272,7 @@ impl ParallelManager {
     }
 
     pub fn apply_secure(&mut self) {
-        self.secure_engine.end_block();
-        let mut state = self.secure_engine.wait_state();
+        let mut state = self.secure_engine.end_block();
         state
             .commit_external(&mut self.state_db, &mut self.state_root, true)
             .unwrap();

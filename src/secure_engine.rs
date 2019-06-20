@@ -1,7 +1,6 @@
-use crate::test_helpers;
 use common_types::block::Block;
 use common_types::transaction::SignedTransaction;
-use crossbeam_channel::{self, unbounded, Receiver, Sender};
+use crossbeam_channel::{self as channel, Receiver, Sender};
 use ethcore::ethereum::new_constantinople_fix_test_machine as machine_generator;
 use ethcore::open_state::State;
 use ethcore::open_state_db::StateDB;
@@ -26,47 +25,41 @@ pub struct SecureEngine {
 }
 
 impl SecureEngine {
-    pub fn start(mut env_info: EnvInfo) -> SecureEngine {
-        let (execution_channel_tx, execution_channel_rx) = unbounded();
-        let (end_block_channel_tx, end_block_channel_rx) = unbounded();
-        let machine = machine_generator();
-        let mut wrap_state: Option<State<StateDB>> = None;
+    pub fn start(env_info: Arc<RwLock<EnvInfo>>) -> SecureEngine {
+        let (execution_channel_tx, execution_channel_rx) = channel::bounded(4);
+        let (end_block_channel_tx, end_block_channel_rx) = channel::bounded(4);
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
         let handler = thread::Builder::new()
             .name(format!("secure_engine"))
             .spawn(move || {
-                let mut block: Arc<RwLock<Block>>;
+                let machine = machine_generator();
                 loop {
                     match execution_channel_rx.recv().unwrap() {
                         SecureEvent::Stop => {
                             break;
                         }
-                        SecureEvent::BeginBlock(state, block_lock) => {
-                            wrap_state = Some(state);
-                            block = block_lock;
-                            let block = &*block.read();
-                            let header = &block.header;
-                            test_helpers::update_envinfo_by_header(&mut env_info, &header);
+                        SecureEvent::BeginBlock(mut state, block_lock) => {
+                            (*running).store(true, Ordering::Relaxed);
+                            let block = &*block_lock.read();
+                            let env_info = env_info.read();
                             for utx in &block.transactions {
                                 if running.load(Ordering::Relaxed) {
                                     let tx = SignedTransaction::new(utx.clone()).unwrap();
-                                    wrap_state
-                                        .as_mut()
-                                        .unwrap()
-                                        .apply(&env_info, &machine, &tx, false)
-                                        .unwrap();
+                                    state.apply(&env_info, &machine, &tx, false).unwrap();
                                 } else {
                                     break;
                                 }
                             }
+                            match execution_channel_rx.recv().unwrap() {
+                                SecureEvent::EndBlock => {
+                                    end_block_channel_tx.send(state).unwrap();
+                                }
+                                _ => (),
+                            }
                         }
-                        SecureEvent::EndBlock => {
-                            end_block_channel_tx
-                                .send(wrap_state.take().unwrap())
-                                .unwrap();
-                        }
+                        _ => (),
                     }
                 }
             })
@@ -86,6 +79,7 @@ impl SecureEngine {
 
     pub fn terminate(&self) {
         (*self.running).store(false, Ordering::Relaxed);
+        self.execution_channel_tx.send(SecureEvent::Stop).unwrap();
     }
 
     pub fn begin_block(&self, state: State<StateDB>, block_lock: Arc<RwLock<Block>>) {
@@ -94,14 +88,10 @@ impl SecureEngine {
             .unwrap();
     }
 
-    pub fn end_block(&self) {
+    pub fn end_block(&self) -> State<StateDB> {
         self.execution_channel_tx
             .send(SecureEvent::EndBlock)
             .unwrap();
-    }
-
-    pub fn wait_state(&self) -> (State<StateDB>) {
-        let state = self.end_block_channel_rx.recv().unwrap();
-        return state;
+        self.end_block_channel_rx.recv().unwrap()
     }
 }

@@ -1,4 +1,3 @@
-use crate::test_helpers;
 use common_types::block::Block;
 use common_types::transaction::SignedTransaction;
 use crossbeam_channel::{self, unbounded, Receiver, Sender};
@@ -31,7 +30,7 @@ pub struct ExecutionEngine {
 }
 
 impl ExecutionEngine {
-    pub fn start(number: usize, mut env_info: EnvInfo) -> ExecutionEngine {
+    pub fn start(number: usize, env_info: Arc<RwLock<EnvInfo>>) -> ExecutionEngine {
         let (execution_channel_tx, execution_channel_rx) = unbounded();
         let (cache_channel_tx, cache_channel_rx) = unbounded();
         let (end_block_channel_tx, end_block_channel_rx) = unbounded();
@@ -51,15 +50,15 @@ impl ExecutionEngine {
                         }
                         ExecutionEvent::Transact(tx_index) => {
                             let block = &*block.read();
+                            let env_info = &*env_info.read();
                             let tx = SignedTransaction::new(block.transactions[tx_index].clone())
                                 .unwrap();
                             let outcome = wrap_state
                                 .as_mut()
                                 .unwrap()
-                                .apply(&env_info, &machine, &tx, true)
+                                .apply(env_info, &machine, &tx, true)
                                 .unwrap();
                             let trace = outcome.trace;
-                            // TODO: check CALL
                             // the transaction has internal call
                             for sub_trace in &trace[1..] {
                                 match &sub_trace.action {
@@ -110,9 +109,6 @@ impl ExecutionEngine {
                         ExecutionEvent::BeginBlock(state, block_lock) => {
                             wrap_state = Some(state);
                             block = block_lock;
-                            let block = &*block.read();
-                            let header = &block.header;
-                            test_helpers::update_envinfo_by_header(&mut env_info, &header);
                         }
                         ExecutionEvent::EndBlock => {
                             let call_addr = mem::replace(&mut internal_call_addr, vec![]);
