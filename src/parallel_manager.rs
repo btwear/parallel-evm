@@ -53,6 +53,10 @@ impl ParallelManager {
         }
     }
 
+    pub fn push_block(&mut self, block: Block) {
+        self.blocks.push(Arc::new(RwLock::new(block)));
+    }
+
     pub fn push_block_and_reward(&mut self, block: Block, reward: Reward) {
         self.blocks.push(Arc::new(RwLock::new(block)));
         self.rewards.push(reward);
