@@ -238,13 +238,15 @@ impl ParallelManager {
         // Find static dependency between threads, and count the
         // dependency level.
         for i in 0..2 {
-            match self.dependency_table.get(insert_addr[i].as_ref().unwrap()) {
-                Some(tid) => {
-                    dependency_tid[i] = *tid;
-                    dependency_level = dependency_level + i + 1;
-                    insert_addr[i] = None;
+            if let Some(addr) = insert_addr[i].as_ref() {
+                match self.dependency_table.get(addr) {
+                    Some(tid) => {
+                        dependency_tid[i] = *tid;
+                        dependency_level = dependency_level + i + 1;
+                        insert_addr[i] = None;
+                    }
+                    None => (),
                 }
-                None => (),
             }
         }
         let mut exec_tid = self.best_thread;
