@@ -23,7 +23,7 @@ pub fn get_temp_state_db() -> StateDB {
     let db = new_db();
     let journal_db = ::journaldb::new(
         db.key_value().clone(),
-        ::journaldb::Algorithm::EarlyMerge,
+        ::journaldb::Algorithm::Archive,
         ::ethcore_db::COL_STATE,
     );
     StateDB::new(journal_db, 5 * 1024 * 1024)
@@ -69,7 +69,7 @@ pub fn open_state_db(db_path: &str) -> StateDB {
     let db = open_database(&db_path);
     let journal_db = journaldb::new(
         db.key_value().clone(),
-        ::journaldb::Algorithm::EarlyMerge,
+        ::journaldb::Algorithm::Archive,
         ::ethcore_db::COL_STATE,
     );
     let state_db = StateDB::new(journal_db, 5 * 1024 * 1024);

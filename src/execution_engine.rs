@@ -31,7 +31,11 @@ pub struct ExecutionEngine {
 }
 
 impl ExecutionEngine {
-    pub fn start(number: usize, env_info: Arc<RwLock<EnvInfo>>) -> ExecutionEngine {
+    pub fn start(
+        number: usize,
+        env_info: Arc<RwLock<EnvInfo>>,
+        tx_delay: usize,
+    ) -> ExecutionEngine {
         let (execution_channel_tx, execution_channel_rx) = unbounded();
         let (cache_channel_tx, cache_channel_rx) = unbounded();
         let (end_block_channel_tx, end_block_channel_rx) = unbounded();
@@ -57,8 +61,11 @@ impl ExecutionEngine {
                                             block.transactions[tx_index].clone(),
                                         )
                                         .unwrap();
-                                        let outcome =
-                                            state.apply(env_info, &machine, &tx, true).unwrap();
+                                        let outcome = state
+                                            .apply_with_delay(
+                                                env_info, &machine, &tx, true, tx_delay,
+                                            )
+                                            .unwrap();
                                         let trace = outcome.trace;
                                         // the transaction has internal call
                                         get_internal_call_address(&trace, &mut internal_call_addr);

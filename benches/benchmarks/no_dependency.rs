@@ -15,6 +15,8 @@ use std::ops::Deref;
 use std::sync::Arc;
 use vm::EnvInfo;
 
+const TX_DELAY: usize = 0;
+
 struct BenchInput {
     state: State<StateDB>,
     transactions: Vec<SignedTransaction>,
@@ -53,7 +55,7 @@ fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
     block.header.set_gas_limit(U256::from(100000000));
     let block = Arc::new(RwLock::new(block));
     b.iter(|| {
-        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![], false);
+        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![], TX_DELAY);
         parallel_manager.push_block_arc(block.clone());
         parallel_manager.add_engines(engines);
         parallel_manager.stop();
@@ -67,7 +69,9 @@ fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
         let mut env_info: EnvInfo = Default::default();
         env_info.gas_limit = U256::from(1000000000);
         for tx in &input.transactions {
-            state.apply(&env_info, &machine, &tx, false).unwrap();
+            state
+                .apply_with_delay(&env_info, &machine, &tx, false, TX_DELAY)
+                .unwrap();
         }
         state.commit().unwrap();
     });

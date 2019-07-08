@@ -25,7 +25,7 @@ pub struct SecureEngine {
 }
 
 impl SecureEngine {
-    pub fn start(env_info: Arc<RwLock<EnvInfo>>) -> SecureEngine {
+    pub fn start(env_info: Arc<RwLock<EnvInfo>>, tx_delay: usize) -> SecureEngine {
         let (execution_channel_tx, execution_channel_rx) = channel::bounded(4);
         let (end_block_channel_tx, end_block_channel_rx) = channel::bounded(4);
         let running = Arc::new(AtomicBool::new(true));
@@ -41,13 +41,17 @@ impl SecureEngine {
                             break;
                         }
                         SecureEvent::BeginBlock(mut state, block_lock) => {
-                            (*running).store(true, Ordering::Relaxed);
                             let block = &*block_lock.read();
                             let env_info = env_info.read();
                             for utx in &block.transactions {
                                 if running.load(Ordering::Relaxed) {
                                     let tx = SignedTransaction::new(utx.clone()).unwrap();
-                                    state.apply(&env_info, &machine, &tx, false).unwrap();
+                                    match state
+                                        .apply_with_delay(&env_info, &machine, &tx, false, tx_delay)
+                                    {
+                                        Err(_) => break,
+                                        _ => (),
+                                    }
                                 } else {
                                     break;
                                 }
@@ -83,6 +87,7 @@ impl SecureEngine {
     }
 
     pub fn begin_block(&self, state: State<StateDB>, block_lock: Arc<RwLock<Block>>) {
+        (*self.running).store(true, Ordering::Relaxed);
         self.execution_channel_tx
             .send(SecureEvent::BeginBlock(state, block_lock))
             .unwrap();

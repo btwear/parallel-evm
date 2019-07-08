@@ -32,11 +32,12 @@ pub struct ParallelManager {
 
     // secure thread
     secure_engine: SecureEngine,
-    secure_on_demand: bool,
+    race: usize,
+    tx_delay: usize,
 }
 
 impl ParallelManager {
-    pub fn new(state: State<StateDB>, last_hashes: Vec<H256>, secure_on_demand: bool) -> Self {
+    pub fn new(state: State<StateDB>, last_hashes: Vec<H256>, tx_delay: usize) -> Self {
         let (root, state_db) = state.clone().drop();
         let env_info: Arc<RwLock<EnvInfo>> = Default::default();
         {
@@ -53,8 +54,9 @@ impl ParallelManager {
             engines: vec![],
             best_thread: 0,
             threads: 0,
-            secure_engine: SecureEngine::start(env_info),
-            secure_on_demand: secure_on_demand,
+            secure_engine: SecureEngine::start(env_info, tx_delay),
+            race: 0,
+            tx_delay: tx_delay,
         }
     }
 
@@ -90,6 +92,7 @@ impl ParallelManager {
             self.engines.push(ExecutionEngine::start(
                 self.threads,
                 self.current_env_info.clone(),
+                self.tx_delay,
             ));
             self.threads += 1;
         }
@@ -143,10 +146,8 @@ impl ParallelManager {
         for engine in &self.engines {
             engine.begin_block(self.state(), block_lock.clone());
         }
-        if !self.secure_on_demand {
-            self.secure_engine
-                .begin_block(self.state(), block_lock.clone());
-        }
+        self.secure_engine
+            .begin_block(self.state(), block_lock.clone());
 
         // Process transactions
         let transactions = &real_block.transactions;
@@ -187,15 +188,10 @@ impl ParallelManager {
         self.dependency_table.clear();
 
         if data_races {
-            if self.secure_on_demand {
-                self.secure_engine
-                    .begin_block(self.state(), block_lock.clone());
-            }
             self.apply_secure();
+            self.race += 1;
         } else {
-            if !self.secure_on_demand {
-                self.secure_engine.terminate();
-            }
+            self.secure_engine.terminate();
             self.apply_states(engine_states);
         }
 
@@ -221,11 +217,16 @@ impl ParallelManager {
             .unwrap();
     }
 
-    pub fn stop(mut self) {
+    pub fn stop(mut self) -> (H256, StateDB) {
+        println!(
+            "Total race number {}, in {} threads.",
+            self.race, self.threads
+        );
         while let Some(engine) = self.engines.pop() {
             engine.stop();
         }
         self.secure_engine.stop();
+        (self.state_root, self.state_db)
     }
 
     #[inline(always)]

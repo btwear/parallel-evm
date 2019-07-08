@@ -13,6 +13,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::ops::Deref;
 use vm::EnvInfo;
 
+const TX_DELAY: usize = 0;
 const TX_COUNT: usize = 100000;
 const CHUNK_SIZE: usize = 2000;
 
@@ -50,7 +51,7 @@ fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
         });
     }
     b.iter(|| {
-        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![], false);
+        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![], TX_DELAY);
         parallel_manager.add_engines(engines);
         for i in 0..TX_COUNT / CHUNK_SIZE {
             parallel_manager.push_block(blocks[i].clone());
@@ -67,7 +68,9 @@ fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
         let mut env_info: EnvInfo = Default::default();
         env_info.gas_limit = U256::from(100_000_000);
         for tx in &input.transactions {
-            state.apply(&env_info, &machine, &tx, false).unwrap();
+            state
+                .apply_with_delay(&env_info, &machine, &tx, false, TX_DELAY)
+                .unwrap();
         }
     });
 }
