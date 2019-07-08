@@ -4,8 +4,6 @@ use common_types::transaction::SignedTransaction;
 use criterion::{Bencher, Criterion, Fun};
 use ethcore::ethereum;
 use ethcore::open_state::CleanupMode;
-use ethcore::open_state::State;
-use ethcore::open_state_db::StateDB;
 use ethereum_types::U256;
 use parallel_evm::parallel_manager::ParallelManager;
 use parallel_evm::test_helpers;
@@ -16,9 +14,9 @@ use std::sync::Arc;
 use vm::EnvInfo;
 
 const TX_DELAY: usize = 0;
+const TX_NUMBER: usize = 20000;
 
 struct BenchInput {
-    state: State<StateDB>,
     transactions: Vec<SignedTransaction>,
 }
 
@@ -55,7 +53,8 @@ fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
     block.header.set_gas_limit(U256::from(100000000));
     let block = Arc::new(RwLock::new(block));
     b.iter(|| {
-        let mut parallel_manager = ParallelManager::new(input.state.clone(), vec![], TX_DELAY);
+        let state = test_helpers::get_temp_state();
+        let mut parallel_manager = ParallelManager::new(state, vec![], TX_DELAY);
         parallel_manager.push_block_arc(block.clone());
         parallel_manager.add_engines(engines);
         parallel_manager.stop();
@@ -64,7 +63,7 @@ fn bench_par_evm(b: &mut Bencher, input: &BenchInput, engines: usize) {
 
 fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
     b.iter(|| {
-        let mut state = input.state.clone();
+        let mut state = test_helpers::get_temp_state();
         let machine = ethereum::new_constantinople_fix_test_machine();
         let mut env_info: EnvInfo = Default::default();
         env_info.gas_limit = U256::from(1000000000);
@@ -73,12 +72,10 @@ fn bench_seq_evm(b: &mut Bencher, input: &BenchInput) {
                 .apply_with_delay(&env_info, &machine, &tx, false, TX_DELAY)
                 .unwrap();
         }
-        state.commit().unwrap();
     });
 }
 
 fn bench(c: &mut Criterion) {
-    let tx_number = 1;
     let seq_evm = Fun::new("Sequential", bench_seq_evm);
     let par_evm_1 = Fun::new("Parallel_1", bench_par_evm_1);
     let par_evm_2 = Fun::new("Parallel_2", bench_par_evm_2);
@@ -86,8 +83,8 @@ fn bench(c: &mut Criterion) {
     let par_evm_6 = Fun::new("Parallel_6", bench_par_evm_6);
     let funs = vec![seq_evm, par_evm_1, par_evm_2, par_evm_4, par_evm_6];
 
-    let senders = test_helpers::random_keypairs(tx_number);
-    let to = test_helpers::random_addresses(tx_number);
+    let senders = test_helpers::random_keypairs(TX_NUMBER);
+    let to = test_helpers::random_addresses(TX_NUMBER);
     let transactions = test_helpers::transfer_txs(&senders, &to);
     let mut state = test_helpers::get_temp_state();
     for tx in &transactions {
@@ -98,10 +95,9 @@ fn bench(c: &mut Criterion) {
     state.commit().unwrap();
 
     let input = BenchInput {
-        state: state,
         transactions: transactions,
     };
-    c.bench_functions("no_dependency", funs, input);
+    c.bench_functions("no_dependency_big_block", funs, input);
 }
 
 criterion_group! {

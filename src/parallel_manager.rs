@@ -218,10 +218,6 @@ impl ParallelManager {
     }
 
     pub fn stop(mut self) -> (H256, StateDB) {
-        println!(
-            "Total race number {}, in {} threads.",
-            self.race, self.threads
-        );
         while let Some(engine) = self.engines.pop() {
             engine.stop();
         }

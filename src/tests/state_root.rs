@@ -35,7 +35,7 @@ fn reproduce_7840001_state_root_parallel() {
             State::from_existing(state_db, state_root_7840000, U256::from(0), factories).unwrap();
 
         let now = Instant::now();
-        let mut parallel_manager = ParallelManager::new(state, last_hashes.clone().into());
+        let mut parallel_manager = ParallelManager::new(state, last_hashes.clone().into(), 0);
         parallel_manager.add_engines(threads);
         parallel_manager.assign_block_and_reward_arc(blocks, rewards);
         for i in 0..n {
